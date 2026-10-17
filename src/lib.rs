@@ -5,6 +5,7 @@ pub mod error;
 pub mod hash;
 pub mod markdown;
 pub mod notation;
+pub mod note;
 pub mod slug;
 pub mod text;
 pub mod value;

@@ -185,10 +185,12 @@ pub fn plan(mut rule: Map<String, Json>, concepts: &BTreeMap<String, Json>) -> R
     let fields: Vec<String> = needed.iter().filter(|n| **n != this).cloned().collect();
     let mut with = Map::new();
     for (i, f) in fields.iter().enumerate() {
-        with.insert(f.clone(), json!({"the": format!("dreams.query/{}", slug(f, i))}));
+        // The head is scaffolding (rows are read from the body), so a field
+        // fed by an optional premise must not make the rule refuse.
+        with.insert(f.clone(), json!({"the": format!("dreams.query/{}", slug(f, i)), "optional": true}));
     }
-    if with.is_empty() {
-        // Dialog's head needs a field: carry `this` through an equality.
+    {
+        // Dialog's head needs one required field: carry `this` through an equality.
         with.insert("dreams-this".into(), json!({"the": "dreams.query/this", "as": "entity:"}));
         rule.get_mut("when").and_then(Json::as_array_mut).map(|w| {
             w.push(json!({"assert": "==", "where": {"this": {"?": {"name": "this"}}, "is": {"?": {"name": "dreams-this"}}}}))
