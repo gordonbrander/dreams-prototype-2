@@ -113,14 +113,8 @@ pub struct Plan {
     pub reduce: Option<Map<String, Json>>,
 }
 
-pub fn plan(mut rule: Map<String, Json>, concepts: &BTreeMap<String, Json>) -> Result<Plan> {
-    if constrains_a_variable(&Json::Object(rule.clone())) {
-        // Dialog parses `{"?": {"where": ...}}` at this tag but ignores it.
-        return Err(Error::query(
-            "constraints inside a variable are not supported yet",
-            Some(r#"use a premise instead: {"assert": ">=", "where": {"of": {"?": {"name": "x"}}, "with": 5}}, or text/like for a prefix"#),
-        ));
-    }
+/// Replace each `{"assert": {"concept": name}}` with the concept inline.
+fn expand_concepts(rule: &mut Map<String, Json>, concepts: &BTreeMap<String, Json>) {
     for key in ["when", "unless"] {
         if let Some(Json::Array(list)) = rule.get_mut(key) {
             for premise in list {
@@ -130,6 +124,38 @@ pub fn plan(mut rule: Map<String, Json>, concepts: &BTreeMap<String, Json>) -> R
             }
         }
     }
+}
+
+/// Install a deductive rule (SPEC §5.4). Its head must be a full concept;
+/// it is stored expanded, so later edits to a named concept don't change it.
+pub async fn define_rule(vault: &Vault, rule: &Json) -> Result<String> {
+    let mut rule = parse(rule)?;
+    if rule.contains_key("reduce") {
+        return Err(Error::query("an installed rule cannot `reduce`", Some("fold in a query instead")));
+    }
+    if rule.get("deduce").and_then(|d| d.get("with")).is_none() {
+        return Err(Error::query("an installed rule needs a full head", Some(r#""deduce": {"description": ..., "with": {...}} in your own domain"#)));
+    }
+    if constrains_a_variable(&Json::Object(rule.clone())) {
+        return Err(Error::query("constraints inside a variable are not supported yet", Some("use a constraint premise")));
+    }
+    let concepts = resolve_concepts(vault, &rule).await?;
+    expand_concepts(&mut rule, &concepts);
+    let compiled = descriptor(rule)?.compile().map_err(|e| Error::query(&e, hint(&e.to_string())))?;
+    let id = compiled.this().to_string();
+    vault.install(compiled).await?;
+    Ok(id)
+}
+
+pub fn plan(mut rule: Map<String, Json>, concepts: &BTreeMap<String, Json>) -> Result<Plan> {
+    if constrains_a_variable(&Json::Object(rule.clone())) {
+        // Dialog parses `{"?": {"where": ...}}` at this tag but ignores it.
+        return Err(Error::query(
+            "constraints inside a variable are not supported yet",
+            Some(r#"use a premise instead: {"assert": ">=", "where": {"of": {"?": {"name": "x"}}, "with": 5}}, or text/like for a prefix"#),
+        ));
+    }
+    expand_concepts(&mut rule, concepts);
     let reduce = match rule.remove("reduce") {
         Some(Json::Object(r)) => Some(r),
         Some(_) => return Err(Error::query("`reduce` must be an object", None)),

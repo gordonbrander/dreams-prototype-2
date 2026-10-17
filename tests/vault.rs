@@ -171,3 +171,85 @@ async fn two_handles_on_one_vault_see_each_others_writes() {
     assert!(note::get(&a, "from-b.md").await.is_ok());
     assert!(note::get(&b, "from-a.md").await.is_ok());
 }
+
+#[tokio::test]
+async fn search_ranks_titles_first_filters_and_catches_up() {
+    use dreams::search::Search;
+    let s = Sandbox::new();
+    let v = Vault::open(&s.0).await.unwrap();
+    write(&v, "notes/body.md", "a long note about sleep and dreams", &["health"]).await;
+    note::put(&v, Put { title: Some("Sleep".into()), content: Some("rest".into()), ..put("journal/title.md") }, false)
+        .await
+        .unwrap();
+    let search = Search::open(&s.0).unwrap();
+    assert_eq!(search.catch_up(&v).await.unwrap(), Some(2));
+    assert_eq!(search.catch_up(&v).await.unwrap(), Some(0), "nothing changed");
+
+    let hits = search.search("sleep", None, None, 10).unwrap();
+    assert_eq!(hits.iter().map(|h| h.path.as_str()).collect::<Vec<_>>(), ["journal/title.md", "notes/body.md"]);
+    assert!(hits[1].snippet.contains("**sleep**"), "{}", hits[1].snippet);
+    assert_eq!(search.search("sleep", Some("health"), None, 10).unwrap().len(), 1);
+    assert_eq!(search.search("sleep", None, Some("journal/"), 10).unwrap()[0].path, "journal/title.md");
+
+    // A write from another handle shows up after catch-up; a delete disappears.
+    let other = Vault::open(&s.0).await.unwrap();
+    write(&other, "notes/new.md", "fresh sleep", &[]).await;
+    note::delete(&other, "notes/body.md", false).await.unwrap();
+    search.catch_up(&v).await.unwrap();
+    let listed = search.search("", None, None, 10).unwrap();
+    assert_eq!(listed[0].path, "notes/new.md", "empty query lists newest first");
+    assert!(!listed.iter().any(|h| h.path == "notes/body.md"));
+}
+
+#[tokio::test]
+async fn open_ended_concepts_from_invented_facts_to_rules() {
+    use dreams::describe::{define_concept, describe};
+    use dreams::notation::define_rule;
+    let s = Sandbox::new();
+    let v = Vault::open(&s.0).await.unwrap();
+
+    // 1. Invent: facts in a new domain, no definition.
+    let fields = json!({"me.recipes/cuisine": "thai", "me.recipes/ingredient": ["rice", "lime"]}).as_object().unwrap().clone();
+    note::put(&v, Put { fields, ..put("recipes/pad-thai.md") }, false).await.unwrap();
+
+    // 2. Discover: describe reports them undeclared, and that ingredient is many-valued.
+    let d = describe(&v, Some("me.recipes")).await.unwrap();
+    let attrs = d["attributes"].as_array().unwrap();
+    let ingredient = attrs.iter().find(|a| a["the"] == "me.recipes/ingredient").unwrap();
+    assert_eq!(ingredient["undeclared"], true);
+    assert_eq!(ingredient["multi"], true);
+    assert_eq!(ingredient["types"], json!(["text:"]));
+
+    // 3. Name: define a concept, then query by name and validate writes.
+    let recipe = json!({"description": "A recipe", "with": {
+        "cuisine": {"description": "Cuisine", "the": "me.recipes/cuisine", "as": "text:"},
+        "ingredient": {"description": "One ingredient", "the": "me.recipes/ingredient", "as": "text:", "pick": "all:"}}});
+    define_concept(&v, "schemas/recipe.yaml", &recipe).await.unwrap();
+    let d = describe(&v, Some("me.recipes")).await.unwrap();
+    assert_eq!(d["concepts"]["schemas/recipe.yaml"]["description"], "A recipe");
+    let ingredient = d["attributes"].as_array().unwrap().iter().find(|a| a["the"] == "me.recipes/ingredient").unwrap().clone();
+    assert_eq!(ingredient["pick"], "all:", "declared now");
+
+    let rows = query(&v, &json!({"deduce": {"find": ["r", "i"]}, "when": [
+        {"assert": {"concept": "schemas/recipe.yaml"}, "where": {"this": {"?": {"name": "r"}}, "ingredient": {"?": {"name": "i"}}}}]}), 100)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 2, "{rows:?}");
+    let missing = Put { concept: Some("schemas/recipe.yaml".into()), ..put("recipes/empty.md") };
+    assert!(matches!(note::put(&v, missing, false).await, Err(Error::Validation { .. })));
+
+    // 4. Install a rule; its conclusions read like stored facts.
+    let rule = json!({
+        "deduce": {"description": "A Thai recipe", "with": {"dish": {"the": "me.recipes.thai/dish", "as": "text:"}}},
+        "when": [
+            {"assert": {"with": {"is": {"the": "me.recipes/cuisine", "as": "text:"}}}, "where": {"this": {"?": {"name": "this"}}, "is": "thai"}},
+            {"assert": {"with": {"is": {"the": "dreams.note/path", "as": "text:"}}}, "where": {"this": {"?": {"name": "this"}}, "is": {"?": {"name": "dish"}}}}]});
+    define_rule(&v, &rule).await.unwrap();
+    let thai = query(&v, &json!({"deduce": {"find": ["r", "dish"]}, "when": [
+        {"assert": {"with": {"is": {"the": "me.recipes.thai/dish", "as": "text:"}}}, "where": {"this": {"?": {"name": "r"}}, "is": {"?": {"name": "dish"}}}}]}), 100)
+        .await
+        .unwrap();
+    assert_eq!(thai.len(), 1, "{thai:?}");
+    assert_eq!(thai[0]["dish"], "recipes/pad-thai.md");
+    assert_eq!(describe(&v, None).await.unwrap()["rules"].as_array().unwrap().len(), 1);
+}
