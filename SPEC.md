@@ -382,7 +382,7 @@ dreams adds exactly two pieces of shorthand. Every other part of the input goes 
 
 - **`find`.** `deduce` may be given as `{"find": ["note", "path"]}`. dreams expands it to a head with `dreams.query/<name>` fields, `as` left open.
 - **Concepts by name.** A premise may be `{"assert": {"concept": "<name>"}, "where": {…}}`.
-  - `<name>` is either a built-in concept name (`task`, `runner`, `run`, `feed`, `feed-item`, `skill`, `prompt`, `daily`, `bookmark`) or a schema note path (`schemas/recipe.yaml`).
+  - `<name>` is either a built-in concept name (`note`, `task`, `runner`, `run`, `feed`, `feed-item`, `skill`, `prompt`, `bookmark`) or a schema note path (`schemas/recipe.yaml`).
   - dreams replaces it with the concept's inline `with`, which is the only form formal notation allows.
   - It is accepted in `query`, `define` and task `when`.
   - An installed rule stores the expanded form, so it keeps working if the schema note later changes.
@@ -418,10 +418,14 @@ Example: notes tagged `dream`, newest first by path.
 8. run receipts of a task, with exit codes
 9. dangling links: "notes someone wished existed", a natural seed for dreaming
 
-**How it runs** (confirmed by `tests/dialog_smoke.rs`):
-1. dreams compiles the descriptor.
-2. It layers it over the branch with `branch.query().with(rule)`, without committing it.
-3. It selects the rule's `deduce` concept, with every head field as a variable.
+**How it runs** (`src/notation.rs`, against Dialog `v0.4.0-rc.2`):
+1. dreams compiles the descriptor and evaluates the rule's **body** (`DeductiveRule::plan`) as a query whose rows are its raw bindings, without installing anything.
+   - Reading the head concept back would be per entity: a head's fields are attributes of `this`, so a row like `(tag, note)` would lose which values went together.
+2. Dialog requires every rule to bind `this`. With `find`, dreams renames the first variable found at a premise's `this` to `this`, and maps it back in the result.
+3. **`reduce` is folded by dreams**, not Dialog. Dialog at this tag refuses `reduce` in a deductive rule. dreams groups rows by the `find` columns that aren't reduced, and folds each group: absent values are skipped, as in SQL.
+4. Constraints inside a variable (`{"?": {"name": "x", "where": {...}}}`) are refused with a hint, because Dialog parses them but ignores them at this tag. Constraint premises (`==`, `<`, `>=`, `text/like`, …) work.
+
+Installed rules (`define`) cannot `reduce`.
 
 ### 8.4 Notation, YAML and the abbreviated form
 

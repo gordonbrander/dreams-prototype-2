@@ -84,6 +84,8 @@ A premise that reads a concept by name. The fields of `where` are the fields of 
 
 `concept` is the name of a built-in concept (for example `task`, `runner`, `run`, `feed`, `feed-item`, `skill`, `prompt`) or the path of a schema note (for example `schemas/recipe.yaml`). Fields that you leave out of `where` must still exist on the entity.
 
+At least one premise in `when` must have a variable at `this`, such as `"this": {"?": {"name": "note"}}`. A query with no such premise fails.
+
 Each row of the result is a JSON object with one key per name in `find`. Entities come back as URIs. Ask for `path` too if you want to show a note to the user.
 
 ### Filter
@@ -107,12 +109,7 @@ To match text against a pattern, use `text/like`. `*` matches any text, and `?` 
   "where": { "text": { "?": { "name": "path" } }, "pattern": "notes/*", "is": { "?": {} } } }
 ```
 
-A variable can carry a prefix or bounds itself. This is faster than a separate premise:
-
-```json
-{ "?": { "name": "path", "where": { "starts-with": "notes/" } } }
-{ "?": { "name": "updated", "where": { ">=": 1760000000000 } } }
-```
+Do not put constraints inside a variable, such as `{"?": {"name": "x", "where": {...}}}`. The vault refuses them. Use a premise instead.
 
 Other formulas: `text/lower-case` and `text/upper-case` (`of`, `is`), `text/length` (`of`, `is`), `text/concatenate` (`first`, `second`, `is`), `math/sum` (`of`, `with`, `is`).
 
@@ -175,8 +172,8 @@ Each recipe is a complete `rule`. Change the constants.
 { "deduce": { "find": ["note", "path", "updated"] },
   "when": [
     { "assert": { "with": { "is": { "the": "dreams.note/updated", "as": "natural:", "pick": "max:" } } },
-      "where": { "this": { "?": { "name": "note" } },
-                 "is": { "?": { "name": "updated", "where": { ">=": 1760000000000 } } } } },
+      "where": { "this": { "?": { "name": "note" } }, "is": { "?": { "name": "updated" } } } },
+    { "assert": ">=", "where": { "of": { "?": { "name": "updated" } }, "with": 1760000000000 } },
     { "assert": { "with": { "is": { "the": "dreams.note/path", "as": "text:" } } },
       "where": { "this": { "?": { "name": "note" } }, "is": { "?": { "name": "path" } } } } ] }
 ```
