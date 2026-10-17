@@ -9,6 +9,7 @@ pub mod markdown;
 pub mod notation;
 pub mod note;
 pub mod search;
+pub mod seed;
 pub mod slug;
 pub mod text;
 pub mod value;

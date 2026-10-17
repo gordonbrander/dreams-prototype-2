@@ -213,11 +213,23 @@ pub async fn put(vault: &Vault, input: Put, trusted: bool) -> Result<Entity> {
     for (the, json) in &input.fields {
         writable(the, trusted)?;
         let as_type = declared_type(the, schema.as_ref());
-        let values = match json {
+        let items: Vec<&Json> = match json {
             Json::Null => vec![],
-            Json::Array(items) => items.iter().map(|j| from_json(j, as_type.as_deref())).collect::<Result<_>>()?,
-            j => vec![from_json(j, as_type.as_deref())?],
+            Json::Array(items) => items.iter().collect(),
+            j => vec![j],
         };
+        let mut values = Vec::new();
+        for j in items {
+            // An entity attribute may name its note by path.
+            if as_type.as_deref() == Some("entity:")
+                && let Some(href) = j.as_str()
+                && !href.starts_with("did:")
+            {
+                values.push(Value::Entity(resolve(vault, href).await?));
+            } else {
+                values.push(from_json(j, as_type.as_deref())?);
+            }
+        }
         set.insert(the.clone(), values);
     }
     if let (Some(name), Some(schema)) = (&input.concept, &schema) {

@@ -10,15 +10,15 @@ A brief is a short page of food for thought for one day. It brings back ideas fr
 ## Make a brief
 
 1. Find the theme.
-   - Find today's local date. Call `get_doc` with `href` set to the date plus `.md`, for example `2026-09-23.md`. See the daily-note skill.
-   - If the note has an `intention`, use it as the theme.
-   - If not, call `changes`, or `search_docs` with no `query`, to find the notes the user changed recently. Find one theme in them.
-2. Find notes. Call `search_docs` many times:
-   - `search_docs` finds keywords, not meanings. A note must contain every word in the query. Use one or two words in each query.
+   - Find today's local date. Call `get_note` with the date plus `.md`, for example `2026-09-23.md`. See the daily-note skill.
+   - If the note has a `dreams.daily/intention`, use it as the theme.
+   - If not, call `changes`, or `search` with no `q`, to find the notes the user changed recently. Find one theme in them.
+2. Find notes. Call `search` many times, and use `backlinks`, `neighbors`, and the dialog skill to follow links:
+   - `search` finds keywords, not meanings. Use one or two words in each query.
    - Search for the words in the theme. Then search for synonyms and related words.
    - Use only the user's own notes. Do not use daily notes, runs, tasks, runners, skills, prompts, or schemas.
    - If yesterday's daily note has a `## Brief` section, do not use the notes it links to.
-   - Call `get_doc` to read the notes that you select.
+   - Call `get_note` to read the notes that you select.
 3. Write the brief in Markdown, with the sections in "Brief sections".
 
 ## Brief sections
@@ -31,7 +31,7 @@ One line. Say the theme and why you selected it: the intention, or the notes it 
 
 Excerpts from 3 notes that relate to the theme. For each note:
 - A short quote from the note.
-- A link to the note as `doc://<id>`.
+- A link to the note as `[[<path>]]`.
 - One line that tells why the note is important for the theme today.
 
 ### Prompt
@@ -52,7 +52,7 @@ Join two ideas to make a new idea.
    - West, "What is similar to X?" What other disciplines could X already exist in? What other disciplines could X help? What are other ways to say or do X?
    - South, "Where can X lead to?" What does X contribute to? What group or category could X be the headline of? What is one level lower? Zoom in. What does X help to grow?
    - East, "What competes with X?" What is the opposite of X? What does X not have? What is its disadvantage? What could make X much stronger?
-3. Write a draft for a new note that joins the two notes: a title and one or two short paragraphs. Link to the two notes as `doc://<id>`. Say which compass directions you used.
+3. Write a draft for a new note that joins the two notes: a title and one or two short paragraphs. Link to the two notes as `[[<path>]]`. Say which compass directions you used.
 4. Write one prompt that asks the user to continue the draft.
 
-Keep the draft in the brief. Do not create a new document.
+Keep the draft in the brief. Do not create a new note.

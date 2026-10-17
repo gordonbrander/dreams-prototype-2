@@ -301,3 +301,27 @@ async fn the_spike_brief_task_imports_as_the_facts_in_spec_section_4() {
         assert_eq!(again.facts.get(the), task.facts.get(the), "{the}");
     }
 }
+
+#[tokio::test]
+async fn seeding_is_idempotent_protected_and_convergent() {
+    use dreams::seed::seed;
+    let s = Sandbox::new();
+    let v = Vault::open(&s.0).await.unwrap();
+    let report = seed(&v).await.unwrap();
+    assert!(report.iter().all(|r| r.error.is_none() && r.skipped.is_empty()), "{report:#?}");
+    let runner = note::get(&v, "runners/claude.json").await.unwrap();
+    assert!(runner.is_protected());
+    let task = note::get(&v, "tasks/brief.json").await.unwrap();
+    assert_eq!(task.first("dreams.task/runner"), Some(&dialog_artifacts::Value::Entity(runner.entity.clone())));
+    let skill = note::get(&v, "skills/dialog.md").await.unwrap();
+    assert_eq!(skill.text("dreams.skill/name"), Some("dialog"));
+
+    let before = note::get(&v, "skills/dreams.md").await.unwrap().updated();
+    seed(&v).await.unwrap();
+    assert_eq!(note::get(&v, "skills/dreams.md").await.unwrap().updated(), before, "reseeding writes nothing");
+
+    let s2 = Sandbox::new();
+    let v2 = Vault::open(&s2.0).await.unwrap();
+    seed(&v2).await.unwrap();
+    assert_eq!(note::get(&v2, "runners/claude.json").await.unwrap().entity, runner.entity, "seeded ids converge");
+}

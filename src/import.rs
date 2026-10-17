@@ -118,7 +118,9 @@ pub async fn import(vault: &Vault, docs: &[(String, String)], opts: &Options) ->
     for r in refs {
         let target = r.href.strip_prefix("doc://").unwrap_or(&r.href);
         let target = target.split('?').next().unwrap_or(target);
+        let current = vault.values(&r.of, &r.the).await?;
         match note::find(vault, target).await? {
+            Some(e) if current == [Value::Entity(e.clone())] => {}
             Some(e) => changes.push(vault::assert(&r.of, &r.the, Value::Entity(e), Pick::Last)?),
             None => {
                 results[r.file].skipped.push(format!("{}: {} names no note; kept as text", r.the, r.href));

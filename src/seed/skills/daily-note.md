@@ -1,39 +1,35 @@
 ---
 _type: doc://schemas/skill.json
 name: daily-note
-description: "Create, add to, or find daily notes: one document per day, with the date as its id. Use when the user mentions today's note, a daily note, a journal, or a log for a day."
+description: "Create, add to, or find daily notes: one note per day, with the date as its path. Use when the user mentions today's note, a daily note, a journal, or a log for a day."
 ---
 # Daily notes
 
-A daily note is one document for one day. Its `_id` is the local date as `YYYY-MM-DD.md`, for example `2026-09-23.md`. The `.md` extension is part of the `_id`. Its `_type` is `doc://schemas/daily.json`. It has the tag `daily`.
+A daily note is one note for one day. Its path is the local date as `YYYY-MM-DD.md`, for example `2026-09-23.md`. The `.md` extension is part of the path. It has the tag `daily`.
 
 A daily note has two parts:
 - `content` is the log for the day. New text goes at the end.
-- `intention` is the one intention for the day. A new intention replaces the old one.
+- `dreams.daily/intention` is the one intention for the day. A new intention replaces the old one.
 
 ## Add to a daily note
 
-1. Find the date. For today, use today's local date. For another day, use that date. If you do not know the date, ask the user. The note id is the date plus `.md`.
-2. Call `get_doc` with `href` set to the note id.
-3. If the document is not found, create it. Call `put_doc` with `_id` set to the note id, `_type` set to `doc://schemas/daily.json`, and no `_parent`. Use this body: `{"title": "<date>", "content": "<text>", "tags": ["daily"]}`.
-4. If the document is found, update it. Call `put_doc` with `_id` set to the note id, `_type` set to `doc://schemas/daily.json`, and `_parent` set to its `_rev`. Send the full body:
-   - Add the new text to the end of `content`. Put one empty line between entries:
-     - If `content` is empty or missing, set `content` to the new text.
-     - If not, remove the newlines at the end of `content`. Then add `\n\n`, then the new text.
-   - Keep all other fields, including `intention`.
-   - Make sure that `tags` contains `daily`. If it does not, add it. Keep the other tags.
-5. If the document is deleted, the error gives the `_rev` of the tombstone. Call `put_doc` with `_parent` set to that `_rev`, and the body from step 3.
-6. If `put_doc` returns a conflict, the note changed after you read it. Go back to step 2.
+1. Find the date. For today, use today's local date. For another day, use that date. If you do not know the date, ask the user. The path is the date plus `.md`.
+2. Call `get_note` with the path.
+3. If the note is not found, create it. Call `put_note` with `path`, `title` set to the date, `content` set to the new text, and `tags` set to `["daily"]`.
+4. If the note is found, update it. Call `put_note` with `path`, `expect_updated` set to the note's `updated`, and `content` set to the old content plus the new text:
+   - If the old content is empty, use the new text.
+   - If not, remove the newlines at the end of the old content. Then add `\n\n`, then the new text.
+   - If the note's tags do not contain `daily`, also send `tags` with `daily` added to its tags.
+   - Send no other fields. Fields you leave out do not change.
+5. If `put_note` fails because the note is stale, the note changed after you read it. Go back to step 2.
 
 Write `content` as Markdown. Do not change or remove earlier text unless the user asks.
 
 ## Set the intention
 
-Do the steps in "Add to a daily note", with these changes:
-- In step 3, use this body: `{"title": "<date>", "content": "", "tags": ["daily"], "intention": "<text>"}`.
-- In step 4, set `intention` to the new text. Do not change `content`.
+Call `put_note` with `path` and `fields` set to `{"dreams.daily/intention": "<text>"}`. If the note is new, also send `title` set to the date and `tags` set to `["daily"]`. Do not send `content`.
 
 ## Find daily notes
 
-- To list daily notes, call `search_docs` with no `query` and `tag` set to `daily`. The newest changes come first.
-- To find a daily note by its text, call `search_docs`.
+- To list daily notes, call `search` with no `q` and `tag` set to `daily`. The newest changes come first.
+- To find a daily note by its text, call `search` with `q`.
