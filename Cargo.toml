@@ -1,0 +1,24 @@
+[package]
+name = "dreams"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+
+[dependencies]
+# Dialog is git-only and breaks often: one pinned tag for every crate.
+# tests/dialog_smoke.rs pins the behaviours dreams relies on; run it first after an upgrade.
+dialog-artifacts = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-capability = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-credentials = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-effects = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-peer = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-query = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-repository = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-storage = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-varsig = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+futures-util = "0.3"
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[dev-dependencies]
+anyhow = "1"
