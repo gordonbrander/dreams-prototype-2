@@ -64,7 +64,7 @@ pub fn parse(path: &str, text: &str) -> Result<Map<String, Json>> {
 /// Every document file under `root`, skipping hidden entries, as (path, text).
 pub fn read_dir(root: &Path) -> Result<Vec<(String, String)>> {
     let mut files = Vec::new();
-    walk(root, root, &mut files)?;
+    walk(root, &mut files)?;
     files.sort();
     files
         .into_iter()
@@ -76,7 +76,7 @@ pub fn read_dir(root: &Path) -> Result<Vec<(String, String)>> {
         .collect()
 }
 
-fn walk(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+fn walk(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         if entry.file_name().to_string_lossy().starts_with('.') {
@@ -84,7 +84,7 @@ fn walk(dir: &Path, root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         }
         let path = entry.path();
         if path.is_dir() {
-            walk(&path, root, files)?;
+            walk(&path, files)?;
         } else if matches!(path.extension().and_then(|e| e.to_str()), Some("md" | "markdown" | "json" | "yaml" | "yml")) {
             files.push(path);
         }

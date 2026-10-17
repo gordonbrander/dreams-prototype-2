@@ -24,7 +24,9 @@ pub async fn describe(vault: &Vault, domain: Option<&str>) -> Result<Json> {
         })
     };
 
-    let mut stats: BTreeMap<String, (usize, BTreeSet<&'static str>, HashMap<Entity, usize>)> = BTreeMap::new();
+    // Per relation: fact count, value types seen, facts per entity.
+    type Stats = (usize, BTreeSet<&'static str>, HashMap<Entity, usize>);
+    let mut stats: BTreeMap<String, Stats> = BTreeMap::new();
     for a in vault.claims(ArtifactSelector::new().the_starting_with(prefix)).await? {
         let the = a.the.to_string();
         if the.starts_with("dialog.") && !prefix.starts_with("dialog.") {

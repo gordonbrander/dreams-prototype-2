@@ -157,10 +157,14 @@ impl Vault {
 
     /// Install a deductive rule: it is stored as facts and syncs.
     pub async fn install(&self, rule: DeductiveRule) -> Result<()> {
-        retry(&self.env, &self.vault, async || {
-            self.vault.transaction().assert(rule.clone()).commit().publish().perform(&self.env).await.map(|_| ())
-        })
-        .await
+        let mut backoff = Backoff::new();
+        loop {
+            let tried = self.vault.transaction().assert(rule.clone()).commit().publish().perform(&self.env).await;
+            match tried {
+                Ok(_) => return Ok(()),
+                Err(e) => backoff.wait(&self.env, &self.vault, e).await?,
+            }
+        }
     }
 
     /// Every value `the` of `of` has held, oldest first, with whether it
@@ -227,11 +231,14 @@ async fn commit(env: &Env, branch: &Branch, changes: Vec<Instruction>) -> Result
     if changes.is_empty() {
         return Ok(());
     }
-    retry(env, branch, async || {
-        let changes: Changes = changes.iter().map(copy).collect();
-        branch.transaction().integrate(changes).commit().publish().perform(env).await.map(|_| ())
-    })
-    .await
+    let mut backoff = Backoff::new();
+    loop {
+        let batch: Changes = changes.iter().map(copy).collect();
+        match branch.transaction().integrate(batch).commit().publish().perform(env).await {
+            Ok(_) => return Ok(()),
+            Err(e) => backoff.wait(env, branch, e).await?,
+        }
+    }
 }
 
 fn copy(change: &Instruction) -> Instruction {
@@ -241,21 +248,27 @@ fn copy(change: &Instruction) -> Instruction {
     }
 }
 
-/// Run `attempt`, and after a failure refresh the head and run it again: a
-/// stale head or a busy lock means another process committed first.
-async fn retry<E: std::fmt::Display>(
-    env: &Env,
-    branch: &Branch,
-    attempt: impl AsyncFn() -> std::result::Result<(), E>,
-) -> Result<()> {
-    let mut wait = Duration::from_millis(10);
-    for _ in 0..RETRIES {
-        if attempt().await.is_ok() {
-            return Ok(());
-        }
-        tokio::time::sleep(wait).await;
-        wait *= 2;
-        branch.refresh(env).await.map_err(Error::dialog)?;
+/// Retrying a commit: a stale head or a busy lock means another process
+/// committed first, so wait, refresh the head and try again.
+// Plain loops, not a retry(closure) helper: async closures capturing
+// references make futures rustc can't prove Send, which MCP handlers need.
+struct Backoff {
+    tries: u32,
+    wait: Duration,
+}
+
+impl Backoff {
+    fn new() -> Self {
+        Backoff { tries: 0, wait: Duration::from_millis(10) }
     }
-    attempt().await.map_err(Error::dialog)
+
+    async fn wait(&mut self, env: &Env, branch: &Branch, error: impl std::fmt::Display) -> Result<()> {
+        self.tries += 1;
+        if self.tries > RETRIES {
+            return Err(Error::dialog(error));
+        }
+        tokio::time::sleep(self.wait).await;
+        self.wait *= 2;
+        branch.refresh(env).await.map_err(Error::dialog)
+    }
 }

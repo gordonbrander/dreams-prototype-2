@@ -344,6 +344,8 @@ fn validate(name: &str, schema: &Json, note: &Note, set: &BTreeMap<String, Vec<V
 /// Link targets in Markdown: `[[target]]`, `[[target|label]]`,
 /// `dreams:///path` and bare `did:key:` URIs.
 pub fn link_targets(content: &str) -> Vec<String> {
+    let prose = without_code(content);
+    let content = prose.as_str();
     let mut out = Vec::new();
     let mut rest = content;
     while let Some(i) = rest.find("[[") {
@@ -367,6 +369,34 @@ pub fn link_targets(content: &str) -> Vec<String> {
                 out.push(target.to_string());
             }
             rest = &tail[end..];
+        }
+    }
+    out
+}
+
+/// Markdown with code fences and inline code spans blanked out: a link
+/// written as an example is not a link.
+fn without_code(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut fenced = false;
+    for line in md.split_inclusive('\n') {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            out.push('\n');
+            continue;
+        }
+        if fenced {
+            out.push('\n');
+            continue;
+        }
+        let mut in_code = false;
+        for c in line.chars() {
+            if c == '`' {
+                in_code = !in_code;
+                out.push(' ');
+            } else {
+                out.push(if in_code { ' ' } else { c });
+            }
         }
     }
     out
@@ -426,7 +456,7 @@ mod tests {
 
     #[test]
     fn link_targets_are_found() {
-        let md = "See [[sleep]] and [[notes/a.md|A]], dreams:///b.md, and did:key:z6Mkabc. Not [[\nbroken]].";
+        let md = "See [[sleep]] and [[notes/a.md|A]], dreams:///b.md, and did:key:z6Mkabc. Not [[\nbroken]], `[[code]]`,\n```\n[[fenced]]\n```\n";
         assert_eq!(link_targets(md), vec!["sleep", "notes/a.md", "b.md", "did:key:z6Mkabc"]);
     }
 

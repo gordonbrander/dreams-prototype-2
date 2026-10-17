@@ -242,9 +242,9 @@ pub fn plan(mut rule: Map<String, Json>, concepts: &BTreeMap<String, Json>) -> R
     {
         // Dialog's head needs one required field: carry `this` through an equality.
         with.insert("dreams-this".into(), json!({"the": "dreams.query/this", "as": "entity:"}));
-        rule.get_mut("when").and_then(Json::as_array_mut).map(|w| {
-            w.push(json!({"assert": "==", "where": {"this": {"?": {"name": "this"}}, "is": {"?": {"name": "dreams-this"}}}}))
-        });
+        if let Some(w) = rule.get_mut("when").and_then(Json::as_array_mut) {
+            w.push(json!({"assert": "==", "where": {"this": {"?": {"name": "this"}}, "is": {"?": {"name": "dreams-this"}}}}));
+        }
     }
     rule.insert("deduce".into(), json!({"with": with}));
     let read = needed.iter().map(|n| (n.clone(), if *n == this { "this".into() } else { n.clone() })).collect();
