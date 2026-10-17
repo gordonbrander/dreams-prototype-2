@@ -4,6 +4,7 @@ pub mod concepts;
 pub mod describe;
 pub mod error;
 pub mod hash;
+pub mod import;
 pub mod markdown;
 pub mod notation;
 pub mod note;

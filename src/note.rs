@@ -166,12 +166,12 @@ pub async fn put(vault: &Vault, input: Put, trusted: bool) -> Result<Entity> {
         (None, Some(p)) => find(vault, p).await?,
         (None, None) => return Err(Error::invalid("give `path` or `entity`")),
     };
-    let created = target.is_none();
     let entity = match target {
         Some(e) => e,
         None => Entity::new().map_err(Error::dialog)?,
     };
     let note = load(vault, &entity).await?;
+    let created = note.facts.is_empty();
     let what = input.path.clone().unwrap_or_else(|| entity.to_string());
     if note.is_protected() && !trusted {
         return Err(Error::protected(what));

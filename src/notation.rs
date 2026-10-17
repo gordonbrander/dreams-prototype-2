@@ -61,6 +61,30 @@ pub async fn query(vault: &Vault, rule: &Json, limit: usize) -> Result<Vec<Row>>
     Ok(out)
 }
 
+/// The query for the spike's task filters, and `task add --tag/--glob/--type`
+/// (SPEC §10.2): notes matching every filter given. `updated` is a column so
+/// that an edit to a matching note changes the rows, which is what wakes a task.
+pub fn filter_query(tag: Option<&str>, glob: Option<&str>, concept: Option<&str>) -> Json {
+    let note = json!({"?": {"name": "note"}});
+    let attr = |the: &str, as_type: &str, pick: &str, is: Json| {
+        json!({"assert": {"with": {"is": {"the": the, "as": as_type, "pick": pick}}}, "where": {"this": note, "is": is}})
+    };
+    let mut when = vec![
+        attr("dreams.note/path", "text:", "last:", json!({"?": {"name": "path"}})),
+        attr("dreams.note/updated", "natural:", "max:", json!({"?": {"name": "updated"}})),
+    ];
+    if let Some(tag) = tag {
+        when.push(attr("dreams.note/tag", "text:", "all:", json!(tag)));
+    }
+    if let Some(glob) = glob {
+        when.push(json!({"assert": "text/like", "where": {"text": {"?": {"name": "path"}}, "pattern": glob, "is": {"?": {}}}}));
+    }
+    if let Some(concept) = concept {
+        when.push(json!({"assert": {"concept": concept}, "where": {"this": note}}));
+    }
+    json!({"deduce": {"find": ["note", "path", "updated"]}, "when": when})
+}
+
 /// Accept a rule as a JSON object, or as JSON or YAML text.
 pub fn parse(input: &Json) -> Result<Map<String, Json>> {
     match input {

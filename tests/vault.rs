@@ -253,3 +253,51 @@ async fn open_ended_concepts_from_invented_facts_to_rules() {
     assert_eq!(thai[0]["dish"], "recipes/pad-thai.md");
     assert_eq!(describe(&v, None).await.unwrap()["rules"].as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn the_spike_brief_task_imports_as_the_facts_in_spec_section_4() {
+    use dreams::import::{Options, export, import, read_dir};
+    let s = Sandbox::new();
+    let v = Vault::open(&s.0).await.unwrap();
+    let docs = vec![
+        ("tasks/brief.json".to_string(), include_str!("../src/seed/tasks/brief.json").to_string()),
+        ("runners/claude.json".to_string(), include_str!("../src/seed/runners/claude.json").to_string()),
+        ("tasks/inbox.json".to_string(), r#"{"_type": "doc://schemas/task.json", "runner": "doc://runners/claude.json",
+            "every": "5m", "prompt": "triage", "when": {"tag": "inbox"}, "startedAt": "x", "Bad Key!": 1}"#.to_string()),
+    ];
+    let report = import(&v, &docs, &Options::default()).await.unwrap();
+    assert!(report.iter().all(|r| r.error.is_none()), "{report:?}");
+
+    let task = note::get(&v, "tasks/brief.json").await.unwrap();
+    let runner = note::get(&v, "runners/claude.json").await.unwrap();
+    let mut relations: Vec<&str> = task.facts.keys().map(String::as_str).collect();
+    relations.sort();
+    assert_eq!(relations, [
+        "dreams.note/by", "dreams.note/created", "dreams.note/path", "dreams.note/title", "dreams.note/updated",
+        "dreams.task/every", "dreams.task/prompt", "dreams.task/runner",
+    ]);
+    assert_eq!(task.first("dreams.task/runner"), Some(&dialog_artifacts::Value::Entity(runner.entity.clone())));
+    assert_eq!(task.text("dreams.task/every"), Some("1d"));
+    let argv: Vec<String> = serde_json::from_str(runner.text("dreams.runner/command").unwrap()).unwrap();
+    assert_eq!(argv[0], "claude", "argv kept in order as JSON text");
+
+    // The spike's `when` filter became a query that finds the tagged notes.
+    let inbox = note::get(&v, "tasks/inbox.json").await.unwrap();
+    let when: Json = serde_json::from_str(inbox.text("dreams.task/when").unwrap()).unwrap();
+    write(&v, "inbox/one.md", "x", &["inbox"]).await;
+    assert_eq!(paths(&v, when, "path").await, ["inbox/one.md"]);
+    assert_eq!(inbox.text("dreams.task/started-at"), Some("x"), "camelCase keys become kebab-case");
+    assert!(report[2].skipped.iter().any(|s| s.contains("bad-key!")), "{:?}", report[2].skipped);
+
+    // Export and re-import into a fresh vault: same facts, same entities.
+    let out = s.0.join("export");
+    export(&v, &out).await.unwrap();
+    let s2 = Sandbox::new();
+    let v2 = Vault::open(&s2.0).await.unwrap();
+    import(&v2, &read_dir(&out).unwrap(), &Options::default()).await.unwrap();
+    let again = note::get(&v2, "tasks/brief.json").await.unwrap();
+    assert_eq!(again.entity, task.entity);
+    for the in ["dreams.note/title", "dreams.task/every", "dreams.task/prompt", "dreams.task/runner"] {
+        assert_eq!(again.facts.get(the), task.facts.get(the), "{the}");
+    }
+}

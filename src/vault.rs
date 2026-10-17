@@ -198,8 +198,13 @@ impl Application for Body {
     }
 }
 
+/// Parse a relation with Dialog's query-layer rules (lowercase kebab-case
+/// names, 64 bytes at most), which are stricter than storage's: a fact
+/// stored under a name the query layer rejects could never be queried.
 pub fn relation(the: &str) -> Result<dialog_artifacts::Relation> {
-    the.parse().map_err(|e| Error::invalid(format!("bad relation {the:?}: {e}")))
+    let bad = |e: &dyn std::fmt::Display| Error::invalid(format!("bad relation {the:?}: {e}"));
+    the.parse::<dialog_query::Relation>().map_err(|e| bad(&e))?;
+    the.parse().map_err(|e| bad(&e))
 }
 
 /// An assertion of `the` = `is` on `of`, under `pick`.
