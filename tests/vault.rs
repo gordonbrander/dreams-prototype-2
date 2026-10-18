@@ -255,15 +255,15 @@ async fn open_ended_concepts_from_invented_facts_to_rules() {
 }
 
 #[tokio::test]
-async fn the_spike_brief_task_imports_as_the_facts_in_spec_section_4() {
+async fn the_brief_task_imports_as_the_facts_in_spec_section_4() {
     use dreams::import::{Options, export, import, read_dir};
     let s = Sandbox::new();
     let v = Vault::open(&s.0).await.unwrap();
     let docs = vec![
         ("tasks/brief.json".to_string(), include_str!("../src/seed/tasks/brief.json").to_string()),
         ("runners/claude.json".to_string(), include_str!("../src/seed/runners/claude.json").to_string()),
-        ("tasks/inbox.json".to_string(), r#"{"_type": "doc://schemas/task.json", "runner": "doc://runners/claude.json",
-            "every": "5m", "prompt": "triage", "when": {"tag": "inbox"}, "startedAt": "x", "Bad Key!": 1}"#.to_string()),
+        ("tasks/inbox.json".to_string(), r#"{"dreams.task": {"runner": "dreams:///runners/claude.json",
+            "every": "5m", "prompt": "triage"}, "startedAt": "x", "Bad Key!": 1}"#.to_string()),
     ];
     let report = import(&v, &docs, &Options::default()).await.unwrap();
     assert!(report.iter().all(|r| r.error.is_none()), "{report:?}");
@@ -281,12 +281,10 @@ async fn the_spike_brief_task_imports_as_the_facts_in_spec_section_4() {
     let argv: Vec<String> = serde_json::from_str(runner.text("dreams.runner/command").unwrap()).unwrap();
     assert_eq!(argv[0], "claude", "argv kept in order as JSON text");
 
-    // The spike's `when` filter became a query that finds the tagged notes.
+    // Keys outside a domain group go in the import's domain, in kebab-case.
     let inbox = note::get(&v, "tasks/inbox.json").await.unwrap();
-    let when: Json = serde_json::from_str(inbox.text("dreams.task/when").unwrap()).unwrap();
-    write(&v, "inbox/one.md", "x", &["inbox"]).await;
-    assert_eq!(paths(&v, when, "path").await, ["inbox/one.md"]);
-    assert_eq!(inbox.text("dreams.task/started-at"), Some("x"), "camelCase keys become kebab-case");
+    assert_eq!(inbox.first("dreams.task/runner"), Some(&dialog_artifacts::Value::Entity(runner.entity.clone())));
+    assert_eq!(inbox.text("dreams.json/started-at"), Some("x"), "camelCase keys become kebab-case");
     assert!(report[2].skipped.iter().any(|s| s.contains("bad-key!")), "{:?}", report[2].skipped);
 
     // Export and re-import into a fresh vault: same facts, same entities.
@@ -346,11 +344,12 @@ async fn nested_objects_and_lists_of_objects_import_as_children_and_export_back(
     let s = Sandbox::new();
     let v = Vault::open(&s.0).await.unwrap();
     let doc = json!({
-        "_type": "doc://schemas/recipe.json",
         "title": "Pad thai",
-        "source": {"book": "Thai Food", "page": 12, "author": {"name": "David"}},
-        "steps": [{"text": "soak noodles", "minutes": 30}, {"text": "fry"}],
-        "single": [{"text": "only one"}]
+        "me.recipe": {
+            "source": {"book": "Thai Food", "page": 12, "author": {"name": "David"}},
+            "steps": [{"text": "soak noodles", "minutes": 30}, {"text": "fry"}],
+            "single": [{"text": "only one"}]
+        }
     });
     let docs = vec![("recipes/pad-thai.json".to_string(), doc.to_string())];
     let report = import(&v, &docs, &Options::default()).await.unwrap();

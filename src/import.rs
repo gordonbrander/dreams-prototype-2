@@ -1,11 +1,9 @@
 //! Import and export (SPEC §7): documents in files to facts and back.
 //!
 //! A file's path is its note's path. A document is JSON, YAML, or Markdown
-//! with YAML frontmatter. Two shapes are read:
-//! - dreams' own (what `export` and `get_note` write, and the seeds use):
-//!   keys grouped by domain, with `dreams:///<path>` links;
-//! - the old prototype's, for migrating its vaults only: flat keys,
-//!   `_type: doc://schemas/<x>.json`, and `doc://` links.
+//! with YAML frontmatter, in the shape `export` and `get_note` write: keys
+//! grouped by domain, with `dreams:///<path>` links. Keys outside a group
+//! go in the import's domain.
 
 use std::path::{Path, PathBuf};
 
@@ -115,11 +113,10 @@ pub async fn import(vault: &Vault, docs: &[(String, String)], opts: &Options) ->
         }
         results.push(result);
     }
-    // Second pass: `dreams:///` and `doc://` links, now that every note has an entity.
+    // Second pass: `dreams:///` links, now that every note has an entity.
     let mut changes = Vec::new();
     for r in refs {
-        let target = r.href.strip_prefix("doc://").unwrap_or(&r.href);
-        let target = target.split('?').next().unwrap_or(target);
+        let target = r.href.as_str();
         let current = vault.values(&r.of, &r.the).await?;
         match note::find(vault, target).await? {
             Some(e) if current == [Value::Entity(e.clone())] => {}
@@ -150,14 +147,10 @@ async fn import_one(
         (None, None) if opts.derive_ids => Entity::of(&("dreams", path)),
         (None, None) => Entity::new().map_err(Error::dialog)?,
     };
-    let domain = match doc.get("_type").and_then(Json::as_str) {
-        Some(t) => type_domain(t),
-        None => opts.domain.clone(),
-    };
     let mut put = Put { path: Some(path.into()), entity: Some(entity.to_string()), ..Default::default() };
     let mut children = Vec::new();
     for (key, v) in doc {
-        if key.starts_with('_') || key == "entity" {
+        if key == "entity" {
             continue;
         }
         match (key.as_str(), &v) {
@@ -171,7 +164,7 @@ async fn import_one(
                 }
             }
             _ => {
-                let the = format!("{domain}/{}", kebab(&key));
+                let the = format!("{}/{}", opts.domain, kebab(&key));
                 field(&mut put, &entity, &the, &v, file, refs, &mut children, skipped)?;
             }
         }
@@ -208,18 +201,8 @@ fn field(
         note::LINK | note::DANGLING | note::CREATED | vault::UPDATED | vault::BY => {}
         _ => match v {
             Json::Null => {}
-            Json::String(s) if s.starts_with("dreams:///") || s.starts_with("doc://") => {
+            Json::String(s) if s.starts_with("dreams:///") => {
                 refs.push(Ref { of: of.clone(), the: the.into(), href: s.clone(), file })
-            }
-            // The spike's task filters become a query.
-            Json::Object(f) if the == "dreams.task/when" => {
-                let concept = f.get("type").and_then(Json::as_str).map(|t| type_domain(t).trim_start_matches("dreams.").to_string());
-                let get = |k: &str| f.get(k).and_then(Json::as_str);
-                if f.contains_key("ids") {
-                    skipped.push(format!("{the}.ids: list the notes in a query instead"));
-                }
-                let q = crate::notation::filter_query(get("tag"), get("glob"), concept.as_deref());
-                put.fields.insert(the.into(), json!(q.to_string()));
             }
             // An ordered list of strings in a text attribute, like a runner's argv: JSON text (SPEC §7.3).
             Json::Array(_) if concepts::type_of(the).as_deref() == Some("text:") && !concepts::is_many(the) => {
@@ -374,13 +357,6 @@ fn as_list(v: &Json) -> Vec<Json> {
     }
 }
 
-/// `doc://schemas/<x>.json` to the domain its documents' keys go in.
-fn type_domain(type_id: &str) -> String {
-    let stem = type_id.trim_start_matches("doc://").trim_start_matches("schemas/");
-    let stem = stem.split(['.', '?']).next().unwrap_or(stem);
-    if concepts::builtin(stem).is_some() || stem == "daily" { format!("dreams.{stem}") } else { format!("me.{}", kebab(stem)) }
-}
-
 /// Whether a key names a domain: dotted, lowercase, no slash.
 fn is_domain(key: &str) -> bool {
     key.contains('.') && !key.contains('/') && key.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || ".-".contains(c))
@@ -442,12 +418,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn keys_and_types_map_to_relations() {
+    fn keys_map_to_relations() {
         assert_eq!(kebab("startedAt"), "started-at");
         assert_eq!(kebab("exit_code"), "exit-code");
-        assert_eq!(type_domain("doc://schemas/task.json"), "dreams.task");
-        assert_eq!(type_domain("doc://schemas/task.json?rev=1-abc"), "dreams.task");
-        assert_eq!(type_domain("doc://schemas/Reading List.json"), "me.reading-list");
         assert!(is_domain("dreams.note") && !is_domain("meta") && !is_domain("a/b"));
     }
 }

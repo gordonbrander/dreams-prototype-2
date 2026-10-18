@@ -129,8 +129,6 @@ mod tests {
         assert_eq!(on_disk, listed);
         for (path, text) in FILES {
             import::parse(path, text).unwrap_or_else(|e| panic!("{path}: {e}"));
-            // Seeds use dreams' own shape; `_type` and `doc://` are for migrating old vaults.
-            assert!(!text.contains("_type") && !text.contains("doc://"), "{path} uses the old prototype's shape");
         }
     }
 }

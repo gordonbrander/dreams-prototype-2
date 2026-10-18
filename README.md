@@ -484,22 +484,14 @@ dreams export ~/backup                      # every note, written back to its pa
 A file's path relative to the folder is its note's path. Importing again updates the same notes. In JSON and YAML:
 
 - `title`, `content`, and `tags` are the note's fields.
+- A key that names a domain, such as `dreams.task` or `me.recipes`, holds that domain's relations. This is the shape `export` and `note get` write.
+- A string `dreams:///<path>` is a link to the note at that path.
 - Other keys go in the `--domain` (default `dreams.json`), as `<domain>/<key in kebab-case>`. A key that is not a valid relation name is reported and skipped, not renamed.
 - An array of values is a set: one fact per value. **Order and duplicates are lost.**
 - A nested object, or a list of objects, becomes a child entity linked from the parent, with an id derived from the parent and the key, so a re-import updates it. Lists of objects keep their order.
 - `null` writes nothing.
 
 Export writes the facts back as nested JSON, YAML, or Markdown. It is faithful to the facts, not to the original bytes.
-
-### From dreams-cli
-
-dreams replaces the SQLite-based `dreams-cli`. To move a vault across:
-
-```
-dreams-cli export /tmp/old && dreams import /tmp/old
-```
-
-`_id` becomes the path, `_type` picks the domain, and `doc://` references become links. Schemas under `schemas/` become concepts. Resolve conflicts in the old vault first: they are not migrated.
 
 ## Where things live
 

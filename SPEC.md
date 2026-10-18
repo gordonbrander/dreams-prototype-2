@@ -131,21 +131,22 @@ A concurrent edit on another device survives, because a retraction removes only 
 
 ---
 
-## 4. Worked example: one spike document as facts
+## 4. Worked example: one document as facts
 
-The spike's seeded `tasks/brief.json`:
+The seeded `tasks/brief.json`:
 
 ```json
 {
-  "_type": "doc://schemas/task.json",
   "title": "Daily brief",
-  "runner": "doc://runners/claude.json",
-  "every": "1d",
-  "prompt": "Use the brief skill and the daily-note skill. …"
+  "dreams.task": {
+    "runner": "dreams:///runners/claude.json",
+    "every": "1d",
+    "prompt": "Use the brief skill and the daily-note skill. …"
+  }
 }
 ```
 
-becomes these facts. `E` is a fresh `did:key`, and `R` is the entity whose path is `runners/claude.json`.
+becomes these facts. `E` is the note's entity, and `R` is the entity whose path is `runners/claude.json`.
 
 | the | of | is |
 |---|---|---|
@@ -158,20 +159,7 @@ becomes these facts. `E` is a fresh `did:key`, and `R` is the entity whose path 
 | `dreams.note/updated` | E | `1760000000000` |
 | `dreams.note/by` | E | `"did:key:z6Mk…(importer session)"` |
 
-`_type` produced no fact. The entity is a Task because it has the Task concept's required attributes (§5).
-
-That input is the old prototype's shape, which `import` reads only to migrate its vaults (§7.5). In dreams' own shape, which `export` writes and the seed files use, the same task is:
-
-```json
-{
-  "title": "Daily brief",
-  "dreams.task": {
-    "runner": "dreams:///runners/claude.json",
-    "every": "1d",
-    "prompt": "Use the brief skill and the daily-note skill. …"
-  }
-}
-```
+Nothing records that E is a task. It is one because it has the Task concept's required attributes (§5).
 
 ---
 
@@ -296,7 +284,7 @@ The caller then keeps the rows with `count > 1`. Range constraints apply in `whe
 
 ## 7. Importing JSON
 
-There are two consumers: migrating a spike vault, and general "drop JSON in" imports such as exports from other tools or API dumps.
+`import` takes JSON in: notes exported from a vault, exports from other tools, and API dumps.
 
 Dialog's `Importer` trait is only `Stream<Item = Result<Artifact, _>>`. The JSON importer is a function from a JSON value to a stream of artifacts, and that's the whole integration.
 
@@ -304,7 +292,7 @@ Dialog's `Importer` trait is only `Stream<Item = Result<Artifact, _>>`. The JSON
 
 `dreams import <dir|file>` reads `.json`, `.yaml`/`.yml`, and `.md` (YAML frontmatter plus a body that becomes `content`).
 
-- A file's relative path is its `dreams.note/path`, as in the spike.
+- A file's relative path is its `dreams.note/path`.
 - An existing note with that path is updated, not duplicated, so re-importing is idempotent.
 - `--domain <d>` sets the domain for unmapped keys (default `dreams.json`).
 - A `.jsonl` file imports one entity per line, with no path.
@@ -314,20 +302,17 @@ Dialog's `Importer` trait is only `Stream<Item = Result<Artifact, _>>`. The JSON
 | JSON | Facts |
 |---|---|
 | Object (the top-level document) | One entity: a random `did:key`, or the existing note at that path. |
-| `_id` | `dreams.note/path` |
-| `_type: doc://schemas/<x>.json` | No fact. The domain for the document's other keys becomes `dreams.<x>` for built-ins, or the domain the schema note's concept uses. |
-| Other `_`-prefixed keys (`_rev`, `_parent`, …) | Dropped. |
+| `entity` | The entity to write, when no note has the path yet. `export` writes it, so a re-import keeps ids. |
+| A key that names a domain (`dreams.task`, `me.recipes`), holding an object | Each of its keys `k` is `<that domain>/k`. This is the shape `export` and `get_note` write. |
 | `title`, `content`, `tags` | `dreams.note/title`, `dreams.note/content`, one `dreams.note/tag` per tag. |
 | Other key `k` | `<domain>/<kebab(k)>`. Keys that break Dialog's name rules, or push the selector past 64 bytes, are reported and skipped. They are never silently renamed. |
-| String | `text:`. A string starting `dreams:///` (or the old prototype's `doc://`) becomes an `entity:` link to the note at that path, resolved in a second pass. Unresolvable ones stay text and are reported. |
+| String | `text:`. A string starting `dreams:///` becomes an `entity:` link to the note at that path, resolved in a second pass. Unresolvable ones stay text and are reported. |
 | Number, boolean | The number or boolean value. |
 | `null` | No fact. Absence is how Dialog says null. |
 | Array of scalars | One fact per element, and the attribute is declared `all:`. Order and duplicates are lost, which is right for tags and sets. |
 | Array that must keep its order | One `text:` value holding the array as JSON (§7.3), when the target concept marks the field ordered. |
 | Nested object | A child entity linked by `entity:`. Its keys go under the domain `<domain>.<kebab(k)>`. Its id is content-derived from `(parent entity, key)` (`EntityExt::of`), so re-imports and edits update the same child. |
 | Array of objects | Child entities with ids derived from `(parent, key, index)`, linked from the parent with `all:`. Each child carries `<domain>.<kebab(k)>/index` (`natural:`) so that export restores the order. Children nest to any depth, until a relation name passes 64 bytes; that key is reported. Arrays that mix objects, arrays and values are reported and skipped. |
-
-The spike's task `when: {tag: "inbox"}` would become a child entity with `dreams.task.when/tag = "inbox"`. On migration, the importer instead rewrites the spike's `when` filters into a `when` query (§10.2), because that is how this design expresses them.
 
 ### 7.3 Ordered arrays
 
@@ -337,19 +322,9 @@ Dialog has a native answer to ordering: position names, a fractional index in th
 
 ### 7.4 Round-trip
 
-`dreams export <dir>` writes each note back to `<path>`, using the format its extension implies, which is the spike's behavior. Unmapped domains come back as nested keys, and child entities come back as the nested objects and ordered lists they were imported from, so a re-import derives the same ids.
+`dreams export <dir>` writes each note back to `<path>`, using the format its extension implies. Unmapped domains come back as nested keys, and child entities come back as the nested objects and ordered lists they were imported from, so a re-import derives the same ids.
 
 The original JSON bytes are not kept, so import followed by export is faithful to the facts, not to the bytes. That is deliberate: keeping a `record:` copy would be a second source of truth, and `record:` is not yet supported end to end in Dialog.
-
-### 7.5 Migrating the spike
-
-```
-dreams-cli export /tmp/old && dreams import /tmp/old
-```
-
-Schemas under `schemas/` are converted to concept notation. `type` maps to `as`, `required` maps to the absence of `optional`, and `array` maps to `all:`. Anything JSON Schema says that a concept can't (patterns, enums, `minLength`) is reported. Those constraints move into dreams' write-time validation for built-ins, and are dropped for user schemas.
-
-Run receipts and feed items are imported as ordinary entities. Conflicting revisions (`_conflicts`) are not migrated; resolve them in the spike first.
 
 ---
 
@@ -766,8 +741,8 @@ Global flags: `--vault` (env `DREAMS_VAULT`) and `--json`. `--actor` is gone; th
 
 ## 16. Milestones
 
-1. **Substrate.** Vault and local repositories, the note model, built-in concepts, `import`/`export` (including spike migration), Tantivy search, and the MCP tools `describe`, `query`, `search`, `get_note`, `put_note`, `delete_note`, `transact`, `define`, `backlinks`, `neighbors` and `history`. Also the `dreams` skill with worked examples.
-   - *Done when:* a migrated spike vault can be explored by Claude Code over MCP using only `describe` and `query`.
+1. **Substrate.** Vault and local repositories, the note model, built-in concepts, `import`/`export`, Tantivy search, and the MCP tools `describe`, `query`, `search`, `get_note`, `put_note`, `delete_note`, `transact`, `define`, `backlinks`, `neighbors` and `history`. Also the `dreams` skill with worked examples.
+   - *Done when:* an imported vault can be explored by Claude Code over MCP using only `describe` and `query`.
 2. **Dreaming.** Runners, tasks with query triggers, deploy confirmation, receipts and leases, the daemon, feeds, skills and prompts, conflicts and resolve.
    - *Done when:* the seeded brief and feed tasks run on the daemon, and a `when` query trigger fires on a dangling link.
 3. **Multiplayer.** Remotes and `sync`, device add, petnames, `dreams://` resolution, `publish`.
