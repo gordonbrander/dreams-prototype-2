@@ -265,7 +265,11 @@ pub async fn delete(vault: &Vault, href: &str, trusted: bool) -> Result<Entity> 
     if note.is_protected() && !trusted {
         return Err(Error::protected(href));
     }
-    let all = vault.claims(ArtifactSelector::new().of(entity.clone())).await?;
+    let mut all = vault.claims(ArtifactSelector::new().of(entity.clone())).await?;
+    // A feed item keeps its feed and key: the marker that it was seen (SPEC §11).
+    if crate::feed::is_item(&note) {
+        all.retain(|a| ![crate::feed::ITEM_FEED, crate::feed::ITEM_KEY].contains(&a.the.to_string().as_str()));
+    }
     vault.write(all.into_iter().map(Instruction::Retract).collect()).await?;
     Ok(entity)
 }
@@ -274,15 +278,18 @@ pub async fn delete(vault: &Vault, href: &str, trusted: bool) -> Result<Entity> 
 pub fn replace(of: &Entity, the: &str, old: &[Value], new: &[Value], many: bool) -> Result<Vec<Instruction>> {
     let mut out = Vec::new();
     let relation = vault::relation(the)?;
+    // Several values of a one-value relation are a conflict (SPEC §6): a
+    // write settles it by retracting every value it doesn't keep.
+    let conflicted = !many && old.len() > 1;
     for v in old {
-        if !new.contains(v) && (many || new.is_empty()) {
+        if !new.contains(v) && (many || conflicted || new.is_empty()) {
             out.push(Instruction::Retract(Artifact { the: relation.clone(), of: of.clone(), is: v.clone(), cause: None }));
         }
     }
-    for v in new {
-        if !old.contains(v) || (!many && old.len() > 1) {
-            out.push(assert(of, the, v.clone(), pick(the, many))?);
-        }
+    for v in new.iter().filter(|v| !old.contains(v)) {
+        // Over a conflict every old value is retracted above; `all:` adds
+        // without electing one more to retract.
+        out.push(assert(of, the, v.clone(), if conflicted { Pick::All } else { pick(the, many) })?);
     }
     Ok(out)
 }

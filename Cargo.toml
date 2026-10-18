@@ -17,6 +17,9 @@ dialog-repository = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.
 dialog-storage = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-varsig = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 anyhow = "1"
+diffy = "0.5"
+feed-rs = "2.4"
+html2text = "0.17"
 clap = { version = "4.6", features = ["derive", "env"] }
 futures-util = "0.3"
 rmcp = { version = "3.4", features = ["server", "macros", "transport-io"] }
@@ -31,6 +34,5 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "io-std", "io-util", "process", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[dev-dependencies]
+ureq = "3.4"
 uuid = { version = "1", features = ["v7"] }

@@ -270,7 +270,7 @@ The caller then keeps the rows with `count > 1`. Range constraints apply in `whe
 1. Fields that only one side changed need nothing; Dialog already merged them per attribute. This is a real simplification, since the spike merged fields by hand.
 2. `content` is merged three-way, line by line, with git-style markers. The common ancestor is the value both conflicting versions superseded, read from Dialog history.
 3. Whatever is still contested goes to a runner, which replies `{content_edits:[{old,new}]}`.
-4. dreams asserts the merged value. `last:` supersedes both, and the conflict disappears.
+4. dreams retracts every value and asserts the merged one, and the conflict disappears. (A `last:` assertion alone retracts only the value it elects, so it would leave the other.)
 
 **Path collisions** (two entities claiming the same `path` after a merge) and **husks** (§3.5) are queries too, shown by `dreams doctor`.
 
@@ -477,8 +477,8 @@ The seeded runners are `claude`, `codex`, `pi` and `feeds`.
 
 `when` holds a formal-notation rule. On each tick, for each due task with a `when`, the daemon:
 1. re-runs the query;
-2. hashes each row;
-3. compares the hashes with the ones saved at the last run (`dreams.deploy/rows`, local repo).
+2. sorts the rows;
+3. compares them with the rows saved at the last run (`dreams.deploy/rows`, local repo, as JSON text).
 
 The task fires when the sets differ. The changed rows are appended to the prompt as "Changed since last run:" followed by one line per added or removed row, which replaces the spike's changed-document list.
 
@@ -503,9 +503,12 @@ A task document syncs, but it runs only where it is deployed. Deploy state lives
 | `dreams.deploy/task` | The task entity |
 | `dreams.deploy/hash` | Hash of the task's and runner's facts as confirmed (canonical CBOR of their sorted facts). Replaces the spike's pinned `task_rev` and runner rev. |
 | `dreams.deploy/enabled` | `boolean:` |
-| `dreams.deploy/cursor` | The vault root at the last run |
+| `dreams.deploy/enabled-at`, `last-run` | `natural:` (Unix ms) |
+| `dreams.deploy/query`, `rows` | The `when` query as deployed, and its rows at the last run. A redeploy keeps the rows unless the query changed. |
 | `dreams.deploy/lease-until` | `natural:` |
 | `dreams.deploy/requested` | `boolean:` (from `run_task`) |
+| `dreams.deploy/pending` | The run in progress (receipt path, start, rows to record), for crash recovery |
+| `dreams.deploy/session` | The DID the task's runs write as |
 
 - **Confirmation.** `deploy_task` shows the exact prompt, command, `cwd`, `when` query and timeout, and asks the person through MCP elicitation, as in the spike. If the task changes while the question is open, it asks again.
 - **Changes after deploy.** A task whose current hash differs from its deployed hash shows as `changed` and does not run until it is redeployed. This covers edits that arrive by sync.
@@ -513,7 +516,7 @@ A task document syncs, but it runs only where it is deployed. Deploy state lives
 
 ### 10.4 Sessions and no self-wake
 
-Each run writes as its own **session DID**, delegated by UCAN from the device's peer key. dreams stamps `dreams.note/by` with it on every write.
+Each run writes as its own **session DID**, derived by Dialog from the device's peer key and the task's entity id (`--session`, `DREAMS_SESSION`), so every run of one task writes as the same DID. dreams stamps `dreams.note/by` with it on every write, the receipt included.
 
 The spike's no-self-wake rule becomes a filter: rows whose entities' latest `by` is the task's session are dropped from the change set. Notes written by an agent can be queried with `dreams.note/by`, which the spike's `_actor` could do only through SQL.
 
@@ -529,7 +532,8 @@ dreams marks protected entities with `dreams.note/protected = true`. `transact`,
 
 - **Receipts.** Each firing writes a Run entity at `runs/<task-path-stem>/<uuidv7>.md`. Receipts sync.
 - **Leases.** Before the agent starts, the scheduler takes a lease in the local repo: the runner's timeout plus one minute. One commit to each repository finishes a run: the receipt goes to the vault, and the cursor moves and the lease is released in the local repo. They are two commits because they are two repositories.
-- **Crash recovery.** If dreams crashes between the two commits, the next tick finds a receipt newer than the cursor and moves the cursor without re-running.
+- **Leases are a compare-and-swap.** The lease commit is tried once on the head the scheduler read; if another process moved the local head, it reads and decides again.
+- **Crash recovery.** If dreams crashes between the two commits, the next tick finds the receipt that `pending` names and records the run without re-running.
 - **The daemon.** `dreams daemon` ticks every `--interval`, and also wakes when the vault's head moves. `daemon install` writes a launchd or systemd unit, as in the spike.
 
 ---

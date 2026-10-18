@@ -10,12 +10,17 @@ use dialog_artifacts::{ArtifactSelector, Instruction};
 use serde::Serialize;
 use serde_json::{Value as Json, json};
 
+use crate::daemon;
 use crate::describe;
+use crate::feed;
+use crate::resolve::{self, Reply};
+use crate::runner::{self, Runner};
+use crate::task;
 use crate::error::Error;
 use crate::import::{self, FileResult, Options};
 use crate::mcp;
 use crate::notation;
-use crate::note;
+use crate::note::{self, Put};
 use crate::search::Search;
 use crate::seed;
 use crate::value::to_json;
@@ -84,6 +89,125 @@ enum Command {
     },
     /// Report husks, path collisions and set-aside rules.
     Doctor,
+    /// Scheduled tasks.
+    #[command(subcommand)]
+    Task(TaskCmd),
+    /// Runners: the commands that start agents.
+    #[command(subcommand)]
+    Runner(RunnerCmd),
+    /// Feeds pulled into the vault.
+    #[command(subcommand)]
+    Feed(FeedCmd),
+    /// Fire every due task once, then exit.
+    Tick,
+    /// Run the scheduler: tick every --interval, and when the vault changes.
+    Daemon {
+        #[command(subcommand)]
+        action: Option<DaemonCmd>,
+        #[arg(long, default_value = "1m")]
+        interval: String,
+        #[arg(long, default_value = "2s")]
+        poll: String,
+    },
+}
+
+#[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
+enum TaskCmd {
+    /// Write a task. It runs only after `task deploy`.
+    Add {
+        path: String,
+        #[arg(long)]
+        runner: String,
+        #[arg(long)]
+        every: String,
+        /// The prompt, or `-` to read it from stdin.
+        #[arg(long)]
+        prompt: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        cwd: Option<String>,
+        /// Fire only when this query's rows change: a file in formal notation.
+        #[arg(long)]
+        when: Option<PathBuf>,
+        /// Fire when a note with this tag changes.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Fire when a note whose path matches this pattern changes.
+        #[arg(long)]
+        glob: Option<String>,
+        /// Fire when a note of this concept changes.
+        #[arg(long = "type")]
+        concept: Option<String>,
+    },
+    /// Every task and its state on this device.
+    List,
+    /// Run a task (or every task) as it is now on this device, after you confirm.
+    Deploy {
+        task: Option<String>,
+        /// Don't ask.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Stop running a task on this device.
+    Disable { task: String },
+    /// Delete a task note. Its receipts stay.
+    Rm { task: String },
+    /// Evaluate one task now: whether it is due, and the rows that changed.
+    Check { task: String },
+    /// Fire a task on the next tick; with --now, here and now, deployed or not.
+    Run {
+        task: String,
+        #[arg(long)]
+        now: bool,
+    },
+    /// A task's receipts, newest first.
+    Runs { task: String },
+}
+
+#[derive(Subcommand)]
+enum RunnerCmd {
+    /// Write a runner: dreams runner add runners/x.json -- program args...
+    Add {
+        path: String,
+        #[arg(long)]
+        timeout: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(last = true, required = true)]
+        command: Vec<String>,
+    },
+    /// Every runner.
+    List,
+}
+
+#[derive(Subcommand)]
+enum FeedCmd {
+    /// Add a feed. Default path: feeds/<origin>.md.
+    Add {
+        url: String,
+        #[arg(long, default_value = "rss")]
+        kind: String,
+        #[arg(long)]
+        path: Option<String>,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        instructions: Option<String>,
+    },
+    /// Every feed.
+    List,
+    /// Pull one feed, or every feed, and print the new items.
+    Pull { feed: Option<String> },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Start the daemon at login and keep it running (launchd or systemd).
+    Install,
+    /// Stop it and remove it.
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -121,6 +245,30 @@ enum NoteCmd {
         note: String,
         #[arg(long)]
         attribute: Option<String>,
+    },
+    /// Notes whose title, content or path hold several values after a sync.
+    Conflicts {
+        /// Check these attributes instead.
+        #[arg(long)]
+        attribute: Vec<String>,
+    },
+    /// Each conflicting value as a diff from the value before both changes.
+    Diff {
+        note: String,
+        #[arg(long, default_value = note::CONTENT)]
+        attribute: String,
+    },
+    /// Settle a conflict with the value in FILE (`-` for stdin), with
+    /// code's line merge when it is clean, or with --auto, a runner's merge.
+    Resolve {
+        note: String,
+        file: Option<PathBuf>,
+        #[arg(long, default_value = note::CONTENT)]
+        attribute: String,
+        #[arg(long)]
+        auto: bool,
+        #[arg(long, default_value = resolve::DEFAULT_RUNNER)]
+        runner: String,
     },
 }
 
@@ -211,7 +359,7 @@ async fn open(dir: &Path, session: &str) -> Result<Vault, Error> {
     Ok(v)
 }
 
-async fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, _confirm: Confirm<'_>) -> anyhow::Result<()> {
+async fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: Confirm<'_>) -> anyhow::Result<()> {
     let json = cli.json;
     let dir = vault_dir(&cli)?;
     match cli.command {
@@ -301,6 +449,180 @@ async fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, _confirm: 
             let report = doctor(&v).await?;
             print_json(out, &report)?;
         }
+        Command::Task(cmd) => task_cmd(cmd, &open(&dir, &cli.session).await?, stdin, out, json, confirm).await?,
+        Command::Runner(cmd) => {
+            let v = open(&dir, &cli.session).await?;
+            match cmd {
+                RunnerCmd::Add { path, timeout, title, command } => {
+                    let mut fields = serde_json::Map::new();
+                    fields.insert(runner::COMMAND.into(), json!(serde_json::to_string(&command)?));
+                    if let Some(t) = timeout {
+                        runner::parse_duration(&t)?;
+                        fields.insert(runner::TIMEOUT.into(), json!(t));
+                    }
+                    let put = Put { path: Some(path.clone()), title, fields, concept: Some("runner".into()), ..Default::default() };
+                    note::put(&v, put, true).await?;
+                    writeln!(out, "wrote {path}")?;
+                }
+                RunnerCmd::List => {
+                    let mut runners = Vec::new();
+                    for a in v.claims(ArtifactSelector::new().the(vault::relation(runner::COMMAND)?)).await? {
+                        let n = note::load(&v, &a.of).await?;
+                        runners.push(match Runner::from_note(&n) {
+                            Ok(r) => json!({"path": r.path, "command": r.command, "timeout": r.timeout, "protected": n.is_protected()}),
+                            Err(e) => json!({"path": n.path(), "error": e.to_string()}),
+                        });
+                    }
+                    print_json(out, &runners)?;
+                }
+            }
+        }
+        Command::Feed(cmd) => {
+            let v = open(&dir, &cli.session).await?;
+            match cmd {
+                FeedCmd::Add { url, kind, path, title, instructions } => {
+                    feed::Kind::parse(&kind)?;
+                    let path = match path {
+                        Some(p) => p,
+                        None => feed::default_path(&url)?,
+                    };
+                    let mut fields = serde_json::Map::new();
+                    fields.insert(feed::URL.into(), json!(url));
+                    fields.insert(feed::KIND.into(), json!(kind));
+                    if let Some(i) = instructions {
+                        fields.insert(feed::INSTRUCTIONS.into(), json!(i));
+                    }
+                    let put = Put { path: Some(path.clone()), title, fields, concept: Some("feed".into()), ..Default::default() };
+                    note::put(&v, put, true).await?;
+                    writeln!(out, "wrote {path}")?;
+                }
+                FeedCmd::List => {
+                    let feeds: Vec<Json> = feed::feeds(&v, None)
+                        .await?
+                        .into_iter()
+                        .map(|f| json!({"path": f.path, "url": f.url, "title": f.title}))
+                        .collect();
+                    print_json(out, &feeds)?;
+                }
+                FeedCmd::Pull { feed: only } => print_json(out, &feed::pull(&v, only.as_deref()).await?)?,
+            }
+        }
+        Command::Tick => {
+            let v = open(&dir, &cli.session).await?;
+            print_json(out, &task::tick(&v).await?)?;
+        }
+        Command::Daemon { action, interval, poll } => match action {
+            Some(DaemonCmd::Install) => {
+                open(&dir, &cli.session).await?;
+                daemon::install(&dir, &std::env::current_exe()?, out)?;
+            }
+            Some(DaemonCmd::Uninstall) => daemon::uninstall(&dir, out)?,
+            None => {
+                install_tracing("info");
+                let v = open(&dir, &cli.session).await?;
+                let secs = |t: &str| runner::parse_duration(t).map(std::time::Duration::from_secs);
+                daemon::run(&v, secs(&interval)?, secs(&poll)?).await?;
+            }
+        },
+    }
+    Ok(())
+}
+
+async fn task_cmd(
+    cmd: TaskCmd,
+    v: &Vault,
+    stdin: &mut dyn Read,
+    out: &mut dyn Write,
+    json: bool,
+    confirm: Confirm<'_>,
+) -> anyhow::Result<()> {
+    match cmd {
+        TaskCmd::Add { path, runner, every, prompt, title, cwd, when, tag, glob, concept } => {
+            runner::parse_duration(&every)?;
+            let prompt = if prompt == "-" { read_text(Path::new("-"), stdin)? } else { prompt };
+            let when = match when {
+                Some(file) => Some(read_text(&file, stdin)?),
+                None if tag.is_some() || glob.is_some() || concept.is_some() => {
+                    Some(notation::filter_query(tag.as_deref(), glob.as_deref(), concept.as_deref()).to_string())
+                }
+                None => None,
+            };
+            let mut fields = serde_json::Map::new();
+            fields.insert(task::RUNNER.into(), json!(runner));
+            fields.insert(task::EVERY.into(), json!(every));
+            fields.insert(task::PROMPT.into(), json!(prompt));
+            if let Some(w) = when {
+                notation::parse(&Json::String(w.clone()))?;
+                fields.insert(task::WHEN.into(), json!(w));
+            }
+            if let Some(c) = cwd {
+                fields.insert(task::CWD.into(), json!(c));
+            }
+            let put = Put { path: Some(path.clone()), title, fields, concept: Some("task".into()), ..Default::default() };
+            note::put(v, put, true).await?;
+            writeln!(out, "wrote {path}; it runs here after `dreams task deploy {path}`")?;
+        }
+        TaskCmd::List => {
+            let list = task::list(v).await?;
+            if json {
+                print_json(out, &list)?;
+            } else {
+                let rows: Vec<Vec<String>> = list
+                    .tasks
+                    .iter()
+                    .map(|t| {
+                        let every = t.task.as_ref().map(|x| x.every.clone()).unwrap_or_default();
+                        vec![t.path.clone(), t.status.clone(), every, t.due.to_string(), t.error.clone().unwrap_or_default()]
+                    })
+                    .collect();
+                table(out, &["TASK", "STATUS", "EVERY", "DUE", "ERROR"], &rows)?;
+                if list.scheduler.stale {
+                    writeln!(out, "\nNo scheduler has ticked in five minutes: run `dreams daemon install`.")?;
+                }
+            }
+        }
+        TaskCmd::Deploy { task: href, yes } => {
+            let plan = task::plan(v, href.as_deref()).await?;
+            if plan.is_empty() {
+                writeln!(out, "nothing to deploy")?;
+                return Ok(());
+            }
+            let text: String = plan.iter().map(task::Deploy::describe).collect::<Vec<_>>().join("\n");
+            write!(out, "{text}")?;
+            if !yes && !confirm("Deploy these tasks on this device?")? {
+                writeln!(out, "nothing deployed")?;
+                return Ok(());
+            }
+            for path in task::apply(v, &plan).await? {
+                writeln!(out, "deployed {path}")?;
+            }
+        }
+        TaskCmd::Disable { task: href } => {
+            task::disable(v, &href).await?;
+            writeln!(out, "disabled {href}")?;
+        }
+        TaskCmd::Rm { task: href } => {
+            note::delete(v, &href, true).await?;
+            writeln!(out, "deleted {href}")?;
+        }
+        TaskCmd::Check { task: href } => {
+            let e = note::resolve(v, &href).await?;
+            print_json(out, &task::evaluate(v, &e, vault::now_ms()).await?)?;
+        }
+        TaskCmd::Run { task: href, now } => {
+            if now {
+                let e = note::resolve(v, &href).await?;
+                let eval = task::evaluate(v, &e, vault::now_ms()).await?;
+                print_json(out, &task::fire(v, &eval, vault::now_ms(), true).await?)?;
+            } else {
+                task::request_run(v, &href).await?;
+                writeln!(out, "{href} fires on the next tick")?;
+            }
+        }
+        TaskCmd::Runs { task: href } => {
+            let runs: Vec<Json> = task::runs(v, &href).await?.iter().map(|n| Json::Object(n.to_json())).collect();
+            print_json(out, &runs)?;
+        }
     }
     Ok(())
 }
@@ -348,6 +670,36 @@ async fn note_cmd(
                 .map(|(the, asserted, is)| json!({"the": the, "asserted": asserted, "is": to_json(&is)}))
                 .collect();
             print_json(out, &rows)?;
+        }
+        NoteCmd::Conflicts { attribute } => {
+            let attrs = if attribute.is_empty() {
+                resolve::DEFAULT_ATTRIBUTES.iter().map(|a| a.to_string()).collect()
+            } else {
+                attribute
+            };
+            print_json(out, &resolve::list(v, &attrs).await?)?;
+        }
+        NoteCmd::Diff { note: href, attribute } => {
+            let c = resolve::read(v, &href, &attribute).await?.ok_or_else(|| Error::invalid(format!("{href} has no conflict on {attribute}")))?;
+            for d in resolve::diffs(&c) {
+                write!(out, "{d}")?;
+            }
+        }
+        NoteCmd::Resolve { note: href, file, attribute, auto, runner } => {
+            let value = if auto {
+                resolve::auto(v, &href, &attribute, &runner).await?
+            } else {
+                let reply = match file {
+                    Some(f) => {
+                        let text = read_text(&f, stdin)?;
+                        let value = if attribute == note::CONTENT { json!(text) } else { serde_json::from_str(&text).unwrap_or(json!(text)) };
+                        Reply { value: Some(value), ..Default::default() }
+                    }
+                    None => Reply::default(),
+                };
+                resolve::resolve(v, &href, &attribute, &reply, true).await?
+            };
+            if json { print_json(out, &value)? } else { writeln!(out, "resolved {href} {attribute}")? }
         }
     }
     Ok(())

@@ -136,6 +136,26 @@ impl Vault {
         commit(&self.env, &self.local, changes).await
     }
 
+    /// Commit `changes` to the local repository once, on the head the last
+    /// `local_claims` read: a compare-and-swap. `false` when another
+    /// process moved the head since; read again and decide again.
+    pub async fn swap_local(&self, changes: Vec<Instruction>) -> Result<bool> {
+        let batch: Changes = changes.into_iter().collect();
+        match self.local.transaction().integrate(batch).commit().publish().perform(&self.env).await {
+            Ok(_) => Ok(true),
+            Err(_) => {
+                self.local.refresh(&self.env).await.map_err(Error::dialog)?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// The vault's head revision, for noticing that something changed.
+    pub async fn head(&self) -> Result<String> {
+        self.vault.refresh(&self.env).await.map_err(Error::dialog)?;
+        Ok(format!("{:?}", self.vault.revision()))
+    }
+
     /// Run a concept query, with `rule` layered over the vault for this
     /// query only when given (SPEC §8.3).
     pub async fn select(&self, query: ConceptQuery, rule: Option<DeductiveRule>) -> Result<Vec<ConceptConclusion>> {
