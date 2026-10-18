@@ -131,21 +131,22 @@ A concurrent edit on another device survives, because a retraction removes only 
 
 ---
 
-## 4. Worked example: one spike document as facts
+## 4. Worked example: one document as facts
 
-The spike's seeded `tasks/brief.json`:
+The seeded `tasks/brief.json`:
 
 ```json
 {
-  "_type": "doc://schemas/task.json",
   "title": "Daily brief",
-  "runner": "doc://runners/claude.json",
-  "every": "1d",
-  "prompt": "Use the brief skill and the daily-note skill. …"
+  "dreams.task": {
+    "runner": "dreams:///runners/claude.json",
+    "every": "1d",
+    "prompt": "Use the brief skill and the daily-note skill. …"
+  }
 }
 ```
 
-becomes these facts. `E` is a fresh `did:key`, and `R` is the entity whose path is `runners/claude.json`.
+becomes these facts. `E` is the note's entity, and `R` is the entity whose path is `runners/claude.json`.
 
 | the | of | is |
 |---|---|---|
@@ -158,7 +159,7 @@ becomes these facts. `E` is a fresh `did:key`, and `R` is the entity whose path 
 | `dreams.note/updated` | E | `1760000000000` |
 | `dreams.note/by` | E | `"did:key:z6Mk…(importer session)"` |
 
-`_type` produced no fact. The entity is a Task because it has the Task concept's required attributes (§5).
+Nothing records that E is a task. It is one because it has the Task concept's required attributes (§5).
 
 ---
 
@@ -197,8 +198,11 @@ with:
 
 The other built-ins, as attribute lists (all `last:` unless noted):
 
+The Task concept also requires `dreams.note/path`, and so does the Runner concept: a task or runner is a note. That keeps their versions (§10.3), which have the same relations but no path, out of `{"concept": "task"}`.
+
 - **Runner:** `dreams.runner/command` (an ordered argv, §7.3), `dreams.runner/timeout` (`text:`)
-- **Run:** `dreams.run/task` (`entity:`), `dreams.run/deploy` (`text:`, the deploy hash, §10.3), `dreams.run/peer` (`text:`, device DID), `dreams.run/started` and `dreams.run/finished` (`natural:`), `dreams.run/exit-code` (`integer:`, optional), `dreams.run/error` (`text:`, optional). The agent's last message goes in `dreams.note/content`.
+- **Version:** `dreams.version/source` (`entity:`), the task or runner that a version freezes (§10.3).
+- **Run:** `dreams.run/task` (`entity:`), `dreams.run/version` (`entity:`, the task version that ran, §10.3), `dreams.run/peer` (`text:`, device DID), `dreams.run/started` and `dreams.run/finished` (`natural:`), `dreams.run/exit-code` (`integer:`, optional), `dreams.run/error` (`text:`, optional). The agent's last message goes in `dreams.note/content`.
 - **Feed:** `dreams.feed/url`, `dreams.feed/kind` (`"rss"` \| `"html"`), `dreams.feed/instructions` (optional)
 - **Feed item:** `dreams.feed-item/feed` (`entity:`), `dreams.feed-item/key`, `url`, `guid`, `published` (each optional except `feed` and `key`)
 - **Skill / Prompt:** `dreams.skill/name` or `dreams.prompt/name`, `dreams.skill/description` or `dreams.prompt/description`. The body is `dreams.note/content`.
@@ -280,7 +284,7 @@ The caller then keeps the rows with `count > 1`. Range constraints apply in `whe
 
 ## 7. Importing JSON
 
-There are two consumers: migrating a spike vault, and general "drop JSON in" imports such as exports from other tools or API dumps.
+`import` takes JSON in: notes exported from a vault, exports from other tools, and API dumps.
 
 Dialog's `Importer` trait is only `Stream<Item = Result<Artifact, _>>`. The JSON importer is a function from a JSON value to a stream of artifacts, and that's the whole integration.
 
@@ -288,7 +292,7 @@ Dialog's `Importer` trait is only `Stream<Item = Result<Artifact, _>>`. The JSON
 
 `dreams import <dir|file>` reads `.json`, `.yaml`/`.yml`, and `.md` (YAML frontmatter plus a body that becomes `content`).
 
-- A file's relative path is its `dreams.note/path`, as in the spike.
+- A file's relative path is its `dreams.note/path`.
 - An existing note with that path is updated, not duplicated, so re-importing is idempotent.
 - `--domain <d>` sets the domain for unmapped keys (default `dreams.json`).
 - A `.jsonl` file imports one entity per line, with no path.
@@ -298,20 +302,17 @@ Dialog's `Importer` trait is only `Stream<Item = Result<Artifact, _>>`. The JSON
 | JSON | Facts |
 |---|---|
 | Object (the top-level document) | One entity: a random `did:key`, or the existing note at that path. |
-| `_id` | `dreams.note/path` |
-| `_type: doc://schemas/<x>.json` | No fact. The domain for the document's other keys becomes `dreams.<x>` for built-ins, or the domain the schema note's concept uses. |
-| Other `_`-prefixed keys (`_rev`, `_parent`, …) | Dropped. |
+| `entity` | The entity to write, when no note has the path yet. `export` writes it, so a re-import keeps ids. |
+| A key that names a domain (`dreams.task`, `me.recipes`), holding an object | Each of its keys `k` is `<that domain>/k`. This is the shape `export` and `get_note` write. |
 | `title`, `content`, `tags` | `dreams.note/title`, `dreams.note/content`, one `dreams.note/tag` per tag. |
 | Other key `k` | `<domain>/<kebab(k)>`. Keys that break Dialog's name rules, or push the selector past 64 bytes, are reported and skipped. They are never silently renamed. |
-| String | `text:`. A string starting `doc://` becomes an `entity:` link to the note at that path, resolved in a second pass. Unresolvable ones stay text and are reported. |
+| String | `text:`. A string starting `dreams:///` becomes an `entity:` link to the note at that path, resolved in a second pass. Unresolvable ones stay text and are reported. |
 | Number, boolean | The number or boolean value. |
 | `null` | No fact. Absence is how Dialog says null. |
 | Array of scalars | One fact per element, and the attribute is declared `all:`. Order and duplicates are lost, which is right for tags and sets. |
 | Array that must keep its order | One `text:` value holding the array as JSON (§7.3), when the target concept marks the field ordered. |
 | Nested object | A child entity linked by `entity:`. Its keys go under the domain `<domain>.<kebab(k)>`. Its id is content-derived from `(parent entity, key)` (`EntityExt::of`), so re-imports and edits update the same child. |
 | Array of objects | Child entities with ids derived from `(parent, key, index)`, linked from the parent with `all:`. Each child carries `<domain>.<kebab(k)>/index` (`natural:`) so that export restores the order. Children nest to any depth, until a relation name passes 64 bytes; that key is reported. Arrays that mix objects, arrays and values are reported and skipped. |
-
-The spike's task `when: {tag: "inbox"}` would become a child entity with `dreams.task.when/tag = "inbox"`. On migration, the importer instead rewrites the spike's `when` filters into a `when` query (§10.2), because that is how this design expresses them.
 
 ### 7.3 Ordered arrays
 
@@ -321,19 +322,9 @@ Dialog has a native answer to ordering: position names, a fractional index in th
 
 ### 7.4 Round-trip
 
-`dreams export <dir>` writes each note back to `<path>`, using the format its extension implies, which is the spike's behavior. Unmapped domains come back as nested keys, and child entities come back as the nested objects and ordered lists they were imported from, so a re-import derives the same ids.
+`dreams export <dir>` writes each note back to `<path>`, using the format its extension implies. Unmapped domains come back as nested keys, and child entities come back as the nested objects and ordered lists they were imported from, so a re-import derives the same ids.
 
 The original JSON bytes are not kept, so import followed by export is faithful to the facts, not to the bytes. That is deliberate: keeping a `record:` copy would be a second source of truth, and `record:` is not yet supported end to end in Dialog.
-
-### 7.5 Migrating the spike
-
-```
-dreams-cli export /tmp/old && dreams import /tmp/old
-```
-
-Schemas under `schemas/` are converted to concept notation. `type` maps to `as`, `required` maps to the absence of `optional`, and `array` maps to `all:`. Anything JSON Schema says that a concept can't (patterns, enums, `minLength`) is reported. Those constraints move into dreams' write-time validation for built-ins, and are dropped for user schemas.
-
-Run receipts and feed items are imported as ordinary entities. Conflicting revisions (`_conflicts`) are not migrated; resolve them in the spike first.
 
 ---
 
@@ -496,25 +487,41 @@ Arbitrary triggers then come for free:
 - "When a feed item from a feed tagged `research` arrives"
 - "When a daily note has an `intention` but no `## Brief`"
 
-### 10.3 Deploy and confirmation (local repo)
+### 10.3 Versions, deploys and confirmation
 
-A task document syncs, but it runs only where it is deployed. Deploy state lives in the **local repository**, which never gets a remote. It is a second Dialog repository, which is simpler than a side file and uses the same API.
+A task note syncs, but it runs only where it is deployed. What runs is not the note, which anyone may edit, but a **version**: a frozen copy of the task and its runner, which a person confirmed.
+
+**Versions.** A version is an entity whose id is the hash of its own facts (`EntityExt::of` over the sorted `(the, is)` pairs). A link to a version is therefore a pin, as `doc://x?rev=…` was in the spike.
+
+| Entity | Repository | Relations |
+|---|---|---|
+| Task version | vault | The task's `dreams.task/{every, prompt, when, cwd}`, and `dreams.task/runner` linking the **runner version**; `dreams.version/source` linking the task |
+| Runner version | vault | The runner's `dreams.runner/{command, timeout}`; `dreams.version/source` linking the runner |
+
+- **Same relations, no path.** A version *is* a task (or a runner): it has the same relations with the same meanings, so the same code reads it. It has no `dreams.note/path`, so it is not a note: no search, no `note put`, no `task list`, and the Task concept (§5.1) does not match it.
+- **The task version covers the runner.** It links the runner version, so its id covers the runner's command too.
+- **Versions are values.** A deploy writes the versions to the vault unstamped, so their facts are exactly what was hashed. Two devices that deploy the same task and runner write the same entities, and a sync merges them with nothing to resolve.
+- **Checked before every run.** The scheduler re-hashes a version's facts and refuses to run one that no longer matches its id. Versions are read-only over MCP, and `dreams.version/*` cannot be written through `transact` (§10.5).
+
+**Deploys.** Deploy state lives in the **local repository**, which never gets a remote. It is a second Dialog repository, which is simpler than a side file and uses the same API.
 
 | Attribute (local repo) | Meaning |
 |---|---|
 | `dreams.deploy/task` | The task entity |
-| `dreams.deploy/hash` | Hash of the task's and runner's facts as confirmed (canonical CBOR of their sorted facts). Replaces the spike's pinned `task_rev` and runner rev. |
+| `dreams.deploy/version` | The task version this device runs |
 | `dreams.deploy/enabled` | `boolean:` |
 | `dreams.deploy/enabled-at`, `last-run` | `natural:` (Unix ms) |
-| `dreams.deploy/query`, `rows` | The `when` query as deployed, and its rows at the last run. A redeploy keeps the rows unless the query changed. |
+| `dreams.deploy/rows` | The `when` query's rows at the last run. A redeploy keeps them unless the version's `when` changed. |
 | `dreams.deploy/lease-until` | `natural:` |
 | `dreams.deploy/requested` | `boolean:` (from `run_task`) |
 | `dreams.deploy/pending` | The run in progress (receipt path, start, rows to record), for crash recovery |
 | `dreams.deploy/session` | The DID the task's runs write as |
 
-- **Confirmation.** `deploy_task` shows the exact prompt, command, `cwd`, `when` query and timeout, and asks the person through MCP elicitation, as in the spike. If the task changes while the question is open, it asks again.
-- **Changes after deploy.** A task whose current hash differs from its deployed hash shows as `changed` and does not run until it is redeployed. This covers edits that arrive by sync.
+- **Confirmation.** `deploy_task` shows the exact prompt, command, `cwd`, `when` query and timeout, and asks the person through MCP elicitation, as in the spike. Those fields are exactly what the version freezes. If the task changes while the question is open, it asks again.
+- **Changes after deploy.** When the live task and runner make a version other than the deployed one, the task shows `changed`. The deployed version keeps running, and the edit runs after the next deploy. This covers edits that arrive by sync.
+- **What stops a deployed task.** Disabling it, deleting the task note, or deleting its runner note.
 - **Who may deploy.** Agents cannot deploy.
+- **Not pinned.** What the agent reads while it runs, such as skills and notes, and the agent's own binary.
 
 ### 10.4 Sessions and no self-wake
 
@@ -525,14 +532,14 @@ The spike's no-self-wake rule becomes a filter: rows whose entities' latest `by`
 ### 10.5 Protected entities
 
 These carry over from the spike:
-- Seeded runners, seeded schema notes and run receipts are read-only over MCP. `doc resolve --auto` runs the seeded runners without a deploy, so an agent must not be able to rewrite them.
+- Seeded runners, seeded schema notes, run receipts and versions are read-only over MCP. `doc resolve --auto` runs the seeded runners without a deploy, so an agent must not be able to rewrite them.
 - Agents may create new runners, because nothing runs until a person deploys it.
 
-dreams marks protected entities with `dreams.note/protected = true`. `transact`, `put_note` and `delete_note` refuse to touch them over MCP. The CLI can, with `--force`.
+dreams marks protected entities with `dreams.note/protected = true`. A version is protected because it has `dreams.version/source`. `transact`, `put_note` and `delete_note` refuse to touch them over MCP. The CLI can, with `--force`.
 
 ### 10.6 Receipts, leases and the daemon
 
-- **Receipts.** Each firing writes a Run entity at `runs/<task-path-stem>/<uuidv7>.md`. Receipts sync.
+- **Receipts.** Each firing writes a Run entity at `runs/<task-path-stem>/<uuidv7>.md`, linking the task and the task version that ran (`dreams.run/version`). Receipts sync, so every device can read exactly what ran. A manual run of a task that is not deployed here writes the version of the live task first, so its receipt links one too.
 - **Leases.** Before the agent starts, the scheduler takes a lease in the local repo: the runner's timeout plus one minute. One commit to each repository finishes a run: the receipt goes to the vault, and the cursor moves and the lease is released in the local repo. They are two commits because they are two repositories.
 - **Leases are a compare-and-swap.** The lease commit is tried once on the head the scheduler read; if another process moved the local head, it reads and decides again.
 - **Crash recovery.** If dreams crashes between the two commits, the next tick finds the receipt that `pending` names and records the run without re-running.
@@ -716,7 +723,7 @@ Global flags: `--vault` (env `DREAMS_VAULT`) and `--json`. `--actor` is gone; th
    - history scan
    - fs storage and its cross-process CAS
    - the fs, S3 and UCAN remotes
-   - `EntityExt::of`
+   - `EntityExt::of`, which is also a version's id: a change to its hash orphans every deployed version (§10.3)
    - picks
 
    `tests/dialog_smoke.rs` checks all of these except the remotes, which `tests/sync.rs` covers (fs only).
@@ -734,8 +741,8 @@ Global flags: `--vault` (env `DREAMS_VAULT`) and `--json`. `--actor` is gone; th
 
 ## 16. Milestones
 
-1. **Substrate.** Vault and local repositories, the note model, built-in concepts, `import`/`export` (including spike migration), Tantivy search, and the MCP tools `describe`, `query`, `search`, `get_note`, `put_note`, `delete_note`, `transact`, `define`, `backlinks`, `neighbors` and `history`. Also the `dreams` skill with worked examples.
-   - *Done when:* a migrated spike vault can be explored by Claude Code over MCP using only `describe` and `query`.
+1. **Substrate.** Vault and local repositories, the note model, built-in concepts, `import`/`export`, Tantivy search, and the MCP tools `describe`, `query`, `search`, `get_note`, `put_note`, `delete_note`, `transact`, `define`, `backlinks`, `neighbors` and `history`. Also the `dreams` skill with worked examples.
+   - *Done when:* an imported vault can be explored by Claude Code over MCP using only `describe` and `query`.
 2. **Dreaming.** Runners, tasks with query triggers, deploy confirmation, receipts and leases, the daemon, feeds, skills and prompts, conflicts and resolve.
    - *Done when:* the seeded brief and feed tasks run on the daemon, and a `when` query trigger fires on a dangling link.
 3. **Multiplayer.** Remotes and `sync`, device add, petnames, `dreams://` resolution, `publish`.

@@ -61,7 +61,7 @@ pub async fn query(vault: &Vault, rule: &Json, limit: usize) -> Result<Vec<Row>>
     Ok(out)
 }
 
-/// The query for the spike's task filters, and `task add --tag/--glob/--type`
+/// The query for `task add --tag/--glob/--type`
 /// (SPEC §10.2): notes matching every filter given. `updated` is a column so
 /// that an edit to a matching note changes the rows, which is what wakes a task.
 pub fn filter_query(tag: Option<&str>, glob: Option<&str>, concept: Option<&str>) -> Json {

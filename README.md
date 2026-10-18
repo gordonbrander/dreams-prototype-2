@@ -292,6 +292,7 @@ Every note is also a resource at `dreams:///<path>`. Notes with `dreams.skill/na
 
 - Write in `dialog.*` or `dreams.deploy/*` with `transact`.
 - Change *protected* notes: the seeded runners and run receipts. The CLI can.
+- Change a version, or write `dreams.version/*`.
 - Deploy a task. Only you can, after you see what will run.
 
 ### Seeded skills and prompts
@@ -345,7 +346,9 @@ The rows that changed are added to the end of the prompt, under "Changed since l
 
 ### Deploys
 
-A deploy records a hash of the task's facts and its runner's facts. If either changes, here or through a sync, `task list` shows the task as `changed`, and it does not run until you deploy again. This matters because a runner is a command line: an edit synced from another device, or written by an agent, never runs before you have seen it.
+A deploy freezes the task and its runner as a *version*: a copy of the prompt, schedule, query, folder, command and timeout, whose id is the hash of its facts. The scheduler runs that version, never the live note. So an edit to the task or its runner, made here, by an agent, or through a sync, does not change what runs. `task list` shows the task as `deployed (changed)`, the deployed version keeps running, and the edit runs after you deploy again. This matters because a runner is a command line: nothing runs before you have seen it.
+
+Before each run, the scheduler checks that the version's facts still match its id, and refuses to run one that was altered. Deleting the task note or its runner note stops the task.
 
 Over MCP, `deploy_task` asks you through your MCP client (elicitation) to confirm the prompt, command, folder, query, and timeout. The agent cannot answer for you. `run_task` asks the scheduler to fire a deployed task on its next tick.
 
@@ -362,7 +365,7 @@ The seeded `runners/claude.json` runs Claude Code headless, with its Bash sandbo
 
 ### Receipts, leases, the daemon
 
-Each run writes a receipt note at `runs/<task>/<uuid>.md`: the task, the deploy hash, start and end times, exit code, error, and the agent's last message as content. Receipts sync, so `task runs` shows runs from every device.
+Each run writes a receipt note at `runs/<task>/<uuid>.md`: the task, the version that ran (`dreams.run/version`), start and end times, exit code, error, and the agent's last message as content. Receipts sync, so `task runs` shows runs from every device, and `dreams note get <version>` on any device shows exactly what ran.
 
 Before the agent starts, the scheduler takes a lease in `local` for the runner's timeout plus a minute. Two schedulers on one vault therefore do not run a task twice. If dreams crashes mid-run, the next tick finishes the bookkeeping without running the agent again.
 
@@ -481,22 +484,14 @@ dreams export ~/backup                      # every note, written back to its pa
 A file's path relative to the folder is its note's path. Importing again updates the same notes. In JSON and YAML:
 
 - `title`, `content`, and `tags` are the note's fields.
+- A key that names a domain, such as `dreams.task` or `me.recipes`, holds that domain's relations. This is the shape `export` and `note get` write.
+- A string `dreams:///<path>` is a link to the note at that path.
 - Other keys go in the `--domain` (default `dreams.json`), as `<domain>/<key in kebab-case>`. A key that is not a valid relation name is reported and skipped, not renamed.
 - An array of values is a set: one fact per value. **Order and duplicates are lost.**
 - A nested object, or a list of objects, becomes a child entity linked from the parent, with an id derived from the parent and the key, so a re-import updates it. Lists of objects keep their order.
 - `null` writes nothing.
 
 Export writes the facts back as nested JSON, YAML, or Markdown. It is faithful to the facts, not to the original bytes.
-
-### From dreams-cli
-
-dreams replaces the SQLite-based `dreams-cli`. To move a vault across:
-
-```
-dreams-cli export /tmp/old && dreams import /tmp/old
-```
-
-`_id` becomes the path, `_type` picks the domain, and `doc://` references become links. Schemas under `schemas/` become concepts. Resolve conflicts in the old vault first: they are not migrated.
 
 ## Where things live
 
@@ -527,7 +522,7 @@ No. Write any relation. Define a concept when you want names in queries, or vali
 Every write is stamped with the writer's session DID in `dreams.note/by`, and each task writes as its own session. Query by `by`, read `note history`, or read a task's receipts with `task runs`.
 
 **Can an agent run code on my machine without asking?**
-Not through dreams. A task runs only after you deploy it, and the deploy shows the exact command. Any change to the task or its runner, including one from a sync, stops it until you deploy again.
+Not through dreams. A task runs only after you deploy it, and the deploy shows the exact command. The scheduler runs the version you confirmed. An edit to the task or its runner, including one from a sync, runs only after you deploy it.
 
 **What happens when I delete a note on one device and edit it on another?**
 The edit survives the sync. You may be left with a husk, a note with some fields but no path. `dreams doctor` lists husks.

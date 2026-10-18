@@ -64,8 +64,10 @@ impl Note {
         self.values(vault::UPDATED).iter().filter_map(value::natural).max().unwrap_or_default()
     }
 
+    /// Read-only over MCP: marked protected, or a version (a frozen
+    /// task or runner), whose facts must keep hashing to its id.
     pub fn is_protected(&self) -> bool {
-        self.first(PROTECTED) == Some(&Value::Boolean(true))
+        self.first(PROTECTED) == Some(&Value::Boolean(true)) || self.facts.contains_key(crate::task::SOURCE)
     }
 
     /// Frontmatter fields grouped by domain, with `content` apart.
@@ -323,7 +325,7 @@ fn check_path(path: &str) -> Result<()> {
 /// Refuse writes to relations no client may name.
 pub fn writable(the: &str, trusted: bool) -> Result<()> {
     vault::relation(the)?;
-    if the.starts_with("dialog.") || the.starts_with("dreams.deploy/") {
+    if the.starts_with("dialog.") || the.starts_with("dreams.deploy/") || the.starts_with("dreams.version/") {
         return Err(Error::protected(the));
     }
     if MANAGED.contains(&the) || (the == PROTECTED && !trusted) {

@@ -51,6 +51,7 @@ pub fn builtins() -> Vec<(&'static str, Json)> {
             concept(
                 "A scheduled agent. Fires every interval, or when its `when` query's results change.",
                 vec![
+                    attr("dreams.note/path", "text:", "last:", req, "Where the task lives"),
                     attr("dreams.task/runner", "entity:", "last:", req, "The runner that executes this task"),
                     attr("dreams.task/every", "text:", "last:", req, "Interval, e.g. 30m, 1d"),
                     attr("dreams.task/prompt", "text:", "last:", req, "What the agent is asked to do"),
@@ -64,6 +65,7 @@ pub fn builtins() -> Vec<(&'static str, Json)> {
             concept(
                 "A command that runs an agent. The prompt arrives on stdin; the last message is read from stdout.",
                 vec![
+                    attr("dreams.note/path", "text:", "last:", req, "Where the runner lives"),
                     attr("dreams.runner/command", "text:", "last:", req, "The argv, as a JSON array of strings"),
                     attr("dreams.runner/timeout", "text:", "last:", opt, "Longest run, e.g. 10m"),
                 ],
@@ -75,13 +77,20 @@ pub fn builtins() -> Vec<(&'static str, Json)> {
                 "The receipt of one firing of a task. The agent's last message is the note's content.",
                 vec![
                     attr("dreams.run/task", "entity:", "last:", req, "The task that fired"),
-                    attr("dreams.run/deploy", "text:", "last:", req, "The deploy hash of the task and runner that ran"),
+                    attr("dreams.run/version", "entity:", "last:", opt, "The task version that ran"),
                     attr("dreams.run/peer", "text:", "last:", req, "The device that ran it"),
                     attr("dreams.run/started", "natural:", "last:", req, "Unix ms"),
                     attr("dreams.run/finished", "natural:", "last:", req, "Unix ms"),
                     attr("dreams.run/exit-code", "integer:", "last:", opt, "The agent's exit code"),
                     attr("dreams.run/error", "text:", "last:", opt, "Why the run failed"),
                 ],
+            ),
+        ),
+        (
+            "version",
+            concept(
+                "A task or runner frozen by a deploy. Its id is the hash of its facts; it never changes.",
+                vec![attr("dreams.version/source", "entity:", "last:", req, "The task or runner this is a frozen copy of")],
             ),
         ),
         (

@@ -1,7 +1,7 @@
 ---
-_type: doc://schemas/skill.json
-name: bookmark
-description: "Save a web page as a bookmark: fetch it, summarize it, and tag it. Use when the user wants to bookmark, clip, or save a link, or find saved links."
+dreams.skill:
+  name: bookmark
+  description: "Save a web page as a bookmark: fetch it, summarize it, and tag it. Use when the user wants to bookmark, clip, or save a link, or find saved links."
 ---
 # Bookmarks
 

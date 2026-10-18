@@ -298,6 +298,12 @@ impl Vault {
         commit(&self.env, &self.vault, changes).await
     }
 
+    /// Commit `changes` to the vault, unstamped: for values, such as
+    /// versions, whose facts must be exactly what was hashed.
+    pub async fn write_unstamped(&self, changes: Vec<Instruction>) -> Result<()> {
+        commit(&self.env, &self.vault, changes).await
+    }
+
     /// Commit `changes` to the local repository, unstamped.
     pub async fn write_local(&self, changes: Vec<Instruction>) -> Result<()> {
         commit(&self.env, &self.local, changes).await
