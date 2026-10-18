@@ -26,10 +26,11 @@ pub const LINK: &str = "dreams.note/link";
 pub const DANGLING: &str = "dreams.note/dangling";
 pub const CREATED: &str = "dreams.note/created";
 pub const PROTECTED: &str = "dreams.note/protected";
+pub const XLINK: &str = "dreams.note/xlink";
 
 /// Relations dreams maintains itself; writes name them only through the
 /// fields that drive them.
-const MANAGED: [&str; 5] = [LINK, DANGLING, CREATED, vault::UPDATED, vault::BY];
+const MANAGED: [&str; 6] = [LINK, DANGLING, XLINK, CREATED, vault::UPDATED, vault::BY];
 
 /// An entity and all of its current facts.
 #[derive(Debug, Clone)]
@@ -105,7 +106,7 @@ pub async fn find(vault: &Vault, href: &str) -> Result<Option<Entity>> {
     let path = match href.strip_prefix("dreams://") {
         Some(rest) => rest
             .strip_prefix('/')
-            .ok_or_else(|| Error::invalid(format!("{href}: other vaults are not followed yet; use dreams:///<path>")))?,
+            .ok_or_else(|| Error::invalid(format!("{href} is in a followed vault: read it with get_note")))?,
         None => href,
     };
     Ok(vault.having(PATH, Value::String(path.into())).await?.into_iter().next())
@@ -120,6 +121,9 @@ pub async fn load(vault: &Vault, entity: &Entity) -> Result<Note> {
 }
 
 pub async fn get(vault: &Vault, href: &str) -> Result<Note> {
+    if let Some(note) = Box::pin(crate::peer::get_remote(vault, href)).await? {
+        return Ok(note);
+    }
     let entity = resolve(vault, href).await?;
     let note = load(vault, &entity).await?;
     if note.facts.is_empty() {
@@ -203,8 +207,12 @@ pub async fn put(vault: &Vault, input: Put, trusted: bool) -> Result<Entity> {
     if let Some(content) = &input.content {
         set.insert(CONTENT.into(), vec![Value::String(content.clone())]);
         let (links, dangling) = resolve_links(vault, content).await?;
+        // Links into followed vaults stay URIs: their notes aren't entities here.
+        let (xlinks, dangling): (Vec<String>, Vec<String>) =
+            dangling.into_iter().partition(|t| t.starts_with("dreams://") && !t.starts_with("dreams:///"));
         set.insert(LINK.into(), links.into_iter().map(Value::Entity).collect());
         set.insert(DANGLING.into(), dangling.into_iter().map(Value::String).collect());
+        set.insert(XLINK.into(), xlinks.into_iter().map(Value::String).collect());
     }
     let schema = match &input.concept {
         Some(name) => Some(notation::concept(vault, name).await?),
@@ -349,7 +357,7 @@ fn validate(name: &str, schema: &Json, note: &Note, set: &BTreeMap<String, Vec<V
 }
 
 /// Link targets in Markdown: `[[target]]`, `[[target|label]]`,
-/// `dreams:///path` and bare `did:key:` URIs.
+/// `dreams:///path`, `dreams://<petname>/path` and bare `did:key:` URIs.
 pub fn link_targets(content: &str) -> Vec<String> {
     let prose = without_code(content);
     let content = prose.as_str();
@@ -365,7 +373,7 @@ pub fn link_targets(content: &str) -> Vec<String> {
         }
         rest = &rest[j + 2..];
     }
-    for prefix in ["dreams:///", "did:key:"] {
+    for prefix in ["dreams://", "did:key:"] {
         let mut rest = content;
         while let Some(i) = rest.find(prefix) {
             let tail = &rest[i..];

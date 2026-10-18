@@ -20,8 +20,8 @@ async fn shutdown() {
     }
 }
 
-/// Tick now, then whenever `interval` has passed or the vault's head moved
-/// (checked every `poll`). Returns on ctrl-c or SIGTERM.
+/// Tick and sync now, then whenever `interval` has passed or the vault's
+/// head moved (checked every `poll`). Returns on ctrl-c or SIGTERM.
 pub async fn run(vault: &Vault, interval: Duration, poll: Duration) -> Result<()> {
     let mut stop = Box::pin(shutdown());
     tracing::info!(vault = %vault.dir.display(), ?interval, ?poll, "daemon started");
@@ -30,6 +30,13 @@ pub async fn run(vault: &Vault, interval: Duration, poll: Duration) -> Result<()
             Ok(r) if !r.fired.is_empty() || !r.errors.is_empty() => tracing::info!(fired = ?r.fired, errors = ?r.errors, "tick"),
             Ok(_) => {}
             Err(e) => tracing::error!(error = %e, "tick failed"),
+        }
+        match crate::peer::sync(vault, true).await {
+            Ok(r) if !r.pulled.is_empty() || !r.pushed.is_empty() || !r.errors.is_empty() => {
+                tracing::info!(pulled = ?r.pulled, pushed = ?r.pushed, errors = ?r.errors, "sync")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "sync failed"),
         }
         let last_tick = Instant::now();
         let head = vault.head().await?;

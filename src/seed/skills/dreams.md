@@ -119,4 +119,9 @@ Some steps need the user. Give the user the exact command.
 - Confirm a deploy. `deploy_task` asks them.
 - Start the scheduler: `dreams daemon install`.
 - Change a seeded runner: the `dreams` CLI.
-- Sync with another device: `dreams sync`.
+- Sync with another device: `dreams remote add <name> <folder>`, then `dreams sync`. A second device runs `dreams device id`; the first runs `dreams device add <that id>`; then the second runs `dreams remote add`.
+- Follow someone's published notes: `dreams peer add <petname> <folder>`.
+
+## Other people's vaults
+
+A followed vault has a petname. Its notes are `dreams://<petname>/<path>`: read them with `get_note`, and query them with `query` or `describe` and `vault` set to the petname. Queries do not join across vaults. To relate their notes to this vault, write a note here that links to them with `[[dreams://<petname>/<path>]]`.

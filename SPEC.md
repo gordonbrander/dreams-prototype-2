@@ -575,65 +575,68 @@ Dialog's model is used as is: Ed25519 `did:key`s with UCAN delegation chains.
 
 ### 12.2 My devices
 
-The vault repository's `main` branch pushes to and pulls from a remote:
+A remote is a folder that holds one repository: it is that repository's *space* (its `credential/key/self` holds the repository's **public** key) plus its blocks and branch heads. The vault's `main` pushes to and pulls from the remote's `main`:
 
 ```
-dreams remote add origin s3://bucket/dreams     # or a folder, or a UCAN service URL
-dreams sync                                     # pull, then push
+dreams remote add origin /Volumes/nas/dreams      # an empty folder becomes this vault's remote
+dreams sync                                       # pull, then push
 ```
 
-- **Push is fast-forward only.** `sync` always pulls first. A rejected push is retried after another pull.
+A second device joins with a delegation:
+
+```
+laptop-2$ dreams device id                         # prints its DID
+laptop-1$ dreams device add did:key:…              # leaves delegations/<did>.ucan in each remote folder
+laptop-2$ dreams remote add origin /Volumes/nas/dreams   # picks the delegation up, tracks laptop-1's repository
+```
+
+- **Keys.** A repository's private key is sealed to the account and only the process that created it holds it. A device therefore delegates with its **own** key, extending the chain repository → account → device → new device. A remote folder never holds a private key.
+- **Which repository.** The folder's `dreams-remote` file names the repository DID it holds. Every device's `main` tracks that one repository, so their changes meet there.
+- **Push is compare-and-swap.** `sync` pulls first; a rejected push pulls and pushes again (three tries).
 - **Pull merges.** Concurrent edits become conflicts (§6), not errors.
-- **Automatic sync.** The daemon syncs on an interval when a remote is configured.
-- **Remote types.** A folder remote, such as a NAS or a Syncthing'd directory, is the "gloves" default. S3/R2 or a UCAN access service is for people without one.
-- **Folder sync is now safe.** The spike warned against putting a live vault in Dropbox or iCloud. A Dialog *remote* is designed for "dumb" shared storage, because it uses blocks plus compare-and-swap. The live `dialog/` folder still must not be in Dropbox.
+- **Automatic sync.** The daemon syncs after every tick when a remote is configured.
+- **Remote records.** Which remotes each space has lives in the local repository (`dreams.remote/*`), per device.
+- **Remote types.** Folder remotes only for now: a NAS or a Syncthing'd directory is the "gloves" default. S3/R2 and UCAN access services come after (`dialog-remote-s3`, `dialog-remote-ucan`).
+- **Folder sync is safe.** The spike warned against putting a live vault in Dropbox or iCloud. A Dialog *remote* is designed for "dumb" shared storage, because it uses blocks plus compare-and-swap. The live `dialog/` folder still must not be in Dropbox.
+- **Stack.** Dialog's sync futures are deep in debug builds; the CLI runs commands on a 64 MiB thread.
 
 ### 12.3 Other people's vaults
 
-**Petnames** are facts in the vault, so they sync across my devices:
-
-| Attribute | |
-|---|---|
-| `dreams.peer/petname` | `"alice"` |
-| `dreams.peer/repository` | Alice's vault DID |
-| `dreams.peer/remote` | Where to pull it from |
-| `dreams.peer/access` | The UCAN delegation granting read access (`text:`, encoded) |
-
-**Following:**
+**Publishing.** UCAN grants apply per repository, so "public notes" means a second repository, `public`:
 
 ```
-dreams peer add alice <remote> --repository did:key:… --access <ucan>
-dreams peer pull alice            # or lazily, on first read
+dreams remote add origin /shared/alice-public --public
+dreams publish notes/x.md          # copy the note's facts into `public`, then sync
+dreams peer grant did:key:…        # leave a delegation for a reader in public's remote folders
 ```
 
-Alice's vault is opened as a separate, read-only Dialog repository replica in `dialog/`. Dialog's lazy hydration fetches only the blocks a query touches, so following a large vault is cheap until it's read.
+A published note is a snapshot with the same entity id; `publish` again updates it.
+
+**Following.** A followed vault is a replica in a local space `peer-<petname>`, pulled from the publisher's folder (the daemon keeps it fresh):
+
+```
+dreams peer add alice /shared/alice-public
+```
+
+**Petnames** are recorded with the remote in the local repository (`dreams.remote/name`), per device, because the delegation that makes a replica readable is per device too.
 
 **`dreams://` URIs:**
 
 | URI | Resolves to |
 |---|---|
 | `dreams:///notes/x.md` | This vault, path `notes/x.md` |
-| `dreams://alice/notes/x.md` | Petname `alice`, then that repository, then the note whose `dreams.note/path` is `notes/x.md` |
-| `dreams://alice/did:key:z6Mk…` | A specific entity in Alice's vault |
+| `dreams://alice/notes/x.md` | Petname `alice`, its replica, then the note whose `dreams.note/path` is `notes/x.md` |
 
-The MCP tools take an optional `vault` (a petname); the default is this vault. `get_note`, `query`, `search` and `describe` work against a followed vault.
+`get_note` and `note get` take either. `query` and `describe` take an optional `vault` (a petname). A `[[dreams://alice/…]]` link in content becomes a `dreams.note/xlink` fact, not a dangling link.
 
-Queries do **not** join across vaults. Each query runs against one repository. An agent that wants to relate Alice's notes to mine queries both and writes `dreams.note/xlink` facts. That is a dreaming task in its own right.
-
-**Publishing.** What Alice can read is her whole `vault` repository, if she delegates read on it. There are no per-note permissions; UCAN grants apply per repository. So "public notes" means a second repository:
-
-```
-dreams publish notes/x.md     # copy the note's facts into the `public` repository
-```
-
-`public` has its own remote and its own read delegation, which Alice hands out.
-
-> Open question: copy, or move with a cross-repository link back? Copying is simpler: a published note is a snapshot, and `publish` again updates it.
+Queries do **not** join across vaults. Each query runs against one repository. An agent that wants to relate Alice's notes to mine queries both and writes notes that link with `dreams://` URIs.
 
 ### 12.4 Gaps to state plainly
 
 - **No encryption on remotes.** Dialog stores nodes unencrypted on remotes for now, and encryption is planned upstream. Until it lands, a remote must be storage the person trusts. `dreams remote add` says so.
-- **Revocation is incomplete upstream.** A delegation handed out can't yet be reliably revoked. Until revocation lands, rotating the remote's storage credentials is the way to cut access.
+- **Revocation is incomplete upstream.** A delegation handed out can't yet be reliably revoked. Until revocation lands, moving to a new remote folder is the way to cut access.
+- **Grants are whole-repository.** `peer grant` delegates the whole `public` repository, writes included; it narrows to reads once Dialog's read-only claims settle.
+- **Search covers this vault only.** Followed vaults are read with `get_note`, `query` and `describe`.
 
 ---
 
@@ -649,8 +652,8 @@ Global flags: `--vault` (env `DREAMS_VAULT`) and `--json`. `--actor` is gone; th
 | `doc changes` | `changes --since` |
 | — | `query <file|->` (notation), `describe [domain]`, `rule add/list/rm`, `doctor`, `reindex` |
 | `import`/`export <dir>` | Same, plus `--domain` (§7) |
-| `pull`/`sync <peer.db>` | `remote add/list/rm`, `pull`, `push`, `sync` |
-| — | `peer add/list/rm/pull`, `publish`, `device add` |
+| `pull`/`sync <peer.db>` | `remote add/list/rm [--public]`, `pull`, `sync` |
+| — | `peer add/list/rm/grant`, `publish`, `device id/add` |
 | `task add/list/deploy/disable/rm/check/run/runs` | Same. `task add --when <query-file>` alongside `--tag`, `--glob` and `--type`. |
 | `runner …`, `feed …`, `tick`, `daemon […]` | Same |
 
@@ -677,7 +680,7 @@ Global flags: `--vault` (env `DREAMS_VAULT`) and `--json`. `--actor` is gone; th
   | `peer` | Petnames, remotes |
 
 - **Dependencies:**
-  - Dialog is git-only, not on crates.io. Every crate is pinned to one tag (`v0.4.0-rc.2`): `dialog-artifacts`, `dialog-capability`, `dialog-credentials`, `dialog-effects`, `dialog-peer`, `dialog-query`, `dialog-repository`, `dialog-storage`, `dialog-varsig`, and `dialog-remote-fs` in M3.
+  - Dialog is git-only, not on crates.io. Every crate is pinned to one tag (`v0.4.0-rc.2`): `dialog-artifacts`, `dialog-capability`, `dialog-credentials`, `dialog-effects`, `dialog-peer`, `dialog-query`, `dialog-repository`, `dialog-storage`, `dialog-varsig`, `dialog-remote-fs` and `dialog-ucan-core`.
   - Opening a vault follows Dialog's tests, not its READMEs, which are stale:
     1. keys from a `CredentialStore` at the vault folder: `system`, `peer` and `custodian`;
     2. `Peer::new(..).at(..).space(..).with(storage).grant(Allowance::storage(..)).base(..)`;
@@ -709,14 +712,14 @@ Global flags: `--vault` (env `DREAMS_VAULT`) and `--json`. `--actor` is gone; th
    - `EntityExt::of`
    - picks
 
-   `tests/dialog_smoke.rs` checks all of these except the remotes.
+   `tests/dialog_smoke.rs` checks all of these except the remotes, which `tests/sync.rs` covers (fs only).
 2. **Notation ergonomics for LLMs.** Formal notation is verbose. Mitigations: `describe` descriptors to paste, the `find` and `concept` shorthands, the `dialog` skill's worked examples, and errors that teach. Measure how often agents get queries wrong. If it's often, adopting Dialog's abbreviated notation is the next step, not a new language.
 3. **Large text.** Content over 4 KiB spills to assets. Tantivy indexing reads the full value, which is fine locally but means a hydration fetch for followed vaults.
 4. **`describe` cost.** Counting facts per attribute scans AEV. Cache the counts with the index and refresh them on the same catch-up.
 
 **Open questions**
 
-- Publish: copy or move? (§12.3)
+- Publish copies (§12.3). Should a published note link back to its source entity?
 - Revisit history and search catch-up when Dialog's tree diff becomes public. Both are full scans today (§9).
 - Should `dreams.note/by` hold the session DID, or the more stable peer DID plus a task entity? (§10.4)
 

@@ -6,17 +6,22 @@
 //! process moved the head first.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use dialog_artifacts::selector::Constrained;
 use dialog_artifacts::history::HistorySelector;
 use dialog_artifacts::{Artifact, ArtifactSelector, Changes, Entity, Instruction, Pick, Value};
 use dialog_capability::Subject;
-use dialog_credentials::SignerCredential;
+use dialog_credentials::{Credential, SignerCredential, VerifierCredential};
+use dialog_effects::credential::prelude::*;
+use dialog_remote_fs::FsAddress;
+use dialog_storage::provider::FileSystem;
+use dialog_storage::resource::Resource as _;
 use dialog_effects::storage::{Directory, Location};
 use dialog_peer::{Allowance, OpenCredential, Peer, Session, SpaceVaultExt as _};
 use dialog_query::{Application, ConceptConclusion, ConceptQuery, DeductiveRule, Environment, EvaluationError, Match, Output as _, Scope, Selection};
-use dialog_repository::{ACCESS_BRANCH, Branch, Repository, RepositoryExt as _};
+use dialog_repository::{ACCESS_BRANCH, Branch, Repository, RepositoryExt as _, SiteAddress, contact};
 use dialog_storage::provider::storage::{CredentialStore, NativeSpace, Storage};
 use dialog_varsig::Principal as _;
 use futures_util::TryStreamExt as _;
@@ -29,12 +34,27 @@ pub type Selector = ArtifactSelector<Constrained>;
 pub const UPDATED: &str = "dreams.note/updated";
 pub const BY: &str = "dreams.note/by";
 
+/// The file in a remote folder that names the repository it holds.
+pub const REMOTE_MARKER: &str = "dreams-remote";
+
+fn delegation_file(folder: &Path, device: &str) -> PathBuf {
+    folder.join("delegations").join(format!("{}.ucan", device.replace(':', "_")))
+}
+
+fn location(folder: &Path) -> Location {
+    Location::at(folder.to_string_lossy().into_owned())
+}
+
 /// How many times a commit refreshes and retries after losing a race.
 const RETRIES: u32 = 8;
 
 pub struct Vault {
     pub dir: PathBuf,
+    /// The space this handle reads and writes: `vault`, `public`, or a followed `peer-<name>`.
+    pub space: String,
+    peer: Peer<NativeSpace>,
     env: Env,
+    repo: Arc<Repository>,
     vault: Branch,
     local: Branch,
 }
@@ -73,13 +93,114 @@ impl Vault {
         }
         let env =
             peer.session(context.as_bytes()).space(peer.state()).allow(Subject::any()).await.map_err(Error::dialog)?;
-        let open = async |name: &str| -> Result<Branch> {
-            let repo = peer.space(name).open().perform(&env).await.map_err(Error::dialog)?;
-            repo.branch("main").open().perform(&env).await.map_err(Error::dialog)
+        let repo = peer.space("vault").open().perform(&env).await.map_err(Error::dialog)?;
+        let vault = repo.branch("main").open().perform(&env).await.map_err(Error::dialog)?;
+        let local = peer.space("local").open().perform(&env).await.map_err(Error::dialog)?;
+        let local = local.branch("main").open().perform(&env).await.map_err(Error::dialog)?;
+        Ok(Vault { dir: dir.to_path_buf(), space: "vault".into(), peer, env, repo: Arc::new(repo), vault, local })
+    }
+
+    /// A handle on another space of this device, sharing this one's session
+    /// and local repository: `public` (what this device publishes) or
+    /// `peer-<name>` (a followed vault's replica).
+    pub async fn view(&self, space: &str) -> Result<Vault> {
+        let repo = self.peer.space(space).open().perform(&self.env).await.map_err(Error::dialog)?;
+        let vault = repo.branch("main").open().perform(&self.env).await.map_err(Error::dialog)?;
+        Ok(Vault {
+            dir: self.dir.clone(),
+            space: space.into(),
+            peer: self.peer.clone(),
+            env: self.env.clone(),
+            repo: Arc::new(repo),
+            vault,
+            local: self.local.clone(),
+        })
+    }
+
+    /// This device's DID: what another device delegates the vault to.
+    pub fn device(&self) -> String {
+        self.peer.did().to_string()
+    }
+
+    /// The vault repository's DID.
+    pub fn repository(&self) -> String {
+        self.repo.did().to_string()
+    }
+
+    /// A delegation of this vault's repository to the device `to`, as bytes.
+    pub async fn delegate(&self, to: &str) -> Result<Vec<u8>> {
+        let did: dialog_varsig::Did = to.parse().map_err(|e| Error::invalid(format!("not a DID: {to} ({e})")))?;
+        // The repository's key is sealed to the account; the device holds the
+        // account's delegation, so it re-delegates with its own key.
+        let chain = self.peer.access().claim(&*self.repo).delegate(did).perform(&self.env).await.map_err(Error::dialog)?;
+        chain.0.to_bytes().map_err(Error::dialog)
+    }
+
+    /// Track `folder` as the remote `name`: the vault's `main` pulls from and
+    /// pushes to the `main` of the repository the folder holds. An empty
+    /// folder becomes the space of this vault's repository; a folder another
+    /// device set up needs that device's delegation (`device add`) first.
+    pub async fn add_remote(&self, name: &str, folder: &Path) -> Result<String> {
+        std::fs::create_dir_all(folder)?;
+        // A delegation another device left here for this one.
+        if let Ok(chain) = std::fs::read(delegation_file(folder, &self.device())) {
+            self.accept(&chain).await?;
+        }
+        let marker = folder.join(REMOTE_MARKER);
+        let target = match std::fs::read_to_string(&marker) {
+            Ok(did) => did.trim().to_string(),
+            Err(_) => {
+                // The folder's identity is the repository's public key only.
+                let fs = FileSystem::open(&location(folder)).await.map_err(Error::dialog)?;
+                let verifier = match self.repo.credential() {
+                    Credential::Signer(s) => Credential::Verifier(VerifierCredential::from(s.0.verifier())),
+                    v => v.clone(),
+                };
+                self.repo.did().credential().key("self").save(verifier).perform(&fs).await.map_err(Error::dialog)?;
+                std::fs::write(&marker, self.repository())?;
+                self.repository()
+            }
         };
-        let vault = open("vault").await?;
-        let local = open("local").await?;
-        Ok(Vault { dir: dir.to_path_buf(), env, vault, local })
+        let did: dialog_varsig::Did = target.parse().map_err(|e| Error::invalid(format!("{marker:?}: {e}")))?;
+        let name = format!("{}-{name}", self.space);
+        contact(&did)
+            .add_address(SiteAddress::Fs(FsAddress::new(location(folder))))
+            .name(name.as_str())
+            .perform(&self.env)
+            .await
+            .map_err(Error::dialog)?;
+        let remote = contact(name.as_str()).connect().repository(did).open().perform(&self.env).await.map_err(Error::dialog)?;
+        let upstream = remote.branch("main").open().perform(&self.env).await.map_err(Error::dialog)?;
+        self.vault.set_upstream(upstream).perform(&self.env).await.map_err(Error::dialog)?;
+        Ok(target)
+    }
+
+    /// Pull the upstream's changes into the vault. `true` when any came.
+    pub async fn pull(&self) -> Result<bool> {
+        self.vault.refresh(&self.env).await.map_err(Error::dialog)?;
+        Ok(self.vault.pull().perform(&self.env).await.map_err(Error::dialog)?.is_some())
+    }
+
+    /// Push the vault to its upstream. Fails when the upstream moved since the last pull.
+    pub async fn push(&self) -> Result<bool> {
+        self.vault.refresh(&self.env).await.map_err(Error::dialog)?;
+        Ok(self.vault.push().perform(&self.env).await.map_err(Error::dialog)?.is_some())
+    }
+
+    /// Leave a delegation of this space's repository to `device` in `folder`,
+    /// where `add_remote` on that device picks it up.
+    pub async fn grant(&self, device: &str, folder: &Path) -> Result<PathBuf> {
+        let file = delegation_file(folder, device);
+        std::fs::create_dir_all(file.parent().expect("a folder"))?;
+        std::fs::write(&file, self.delegate(device).await?)?;
+        Ok(file)
+    }
+
+    /// Keep a delegation another device made for this one.
+    pub async fn accept(&self, chain: &[u8]) -> Result<()> {
+        let chain = dialog_ucan_core::DelegationChain::try_from(chain).map_err(Error::dialog)?;
+        self.peer.access().save(chain.into()).perform(&self.env).await.map_err(Error::dialog)?;
+        Ok(())
     }
 
     /// The DID this process writes as: the value of `dreams.note/by`.

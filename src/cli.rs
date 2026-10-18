@@ -21,6 +21,7 @@ use crate::import::{self, FileResult, Options};
 use crate::mcp;
 use crate::notation;
 use crate::note::{self, Put};
+use crate::peer;
 use crate::search::Search;
 use crate::seed;
 use crate::value::to_json;
@@ -100,6 +101,21 @@ enum Command {
     Feed(FeedCmd),
     /// Fire every due task once, then exit.
     Tick,
+    /// Folders this vault syncs with.
+    #[command(subcommand)]
+    Remote(RemoteCmd),
+    /// Pull every remote's changes.
+    Pull,
+    /// Pull, then push to every remote of the vault and of `public`.
+    Sync,
+    /// This device, and the devices that may sync this vault.
+    #[command(subcommand)]
+    Device(DeviceCmd),
+    /// Other people's vaults you follow, by petname.
+    #[command(subcommand)]
+    Peer(PeerCmd),
+    /// Copy a note into your public repository and push it.
+    Publish { note: String },
     /// Run the scheduler: tick every --interval, and when the vault changes.
     Daemon {
         #[command(subcommand)]
@@ -203,6 +219,43 @@ enum FeedCmd {
 }
 
 #[derive(Subcommand)]
+enum RemoteCmd {
+    /// Sync with FOLDER. An empty folder becomes this vault's remote; a
+    /// folder another device set up needs its `dreams device add` first.
+    Add {
+        name: String,
+        folder: PathBuf,
+        /// A remote of the public repository instead.
+        #[arg(long)]
+        public: bool,
+    },
+    List,
+    Rm {
+        name: String,
+        #[arg(long)]
+        public: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum DeviceCmd {
+    /// Print this device's DID, for `dreams device add` on another device.
+    Id,
+    /// Let the device DID sync this vault: leaves a delegation in each remote folder.
+    Add { did: String },
+}
+
+#[derive(Subcommand)]
+enum PeerCmd {
+    /// Follow the vault published in FOLDER as NAME. Its notes are dreams://NAME/<path>.
+    Add { name: String, folder: PathBuf },
+    List,
+    Rm { name: String },
+    /// Let the device DID follow what you publish.
+    Grant { did: String },
+}
+
+#[derive(Subcommand)]
 enum DaemonCmd {
     /// Start the daemon at login and keep it running (launchd or systemd).
     Install,
@@ -282,8 +335,11 @@ enum RuleCmd {
     Rm { entity: String },
 }
 
+/// Stack for the threads that run commands.
+pub const STACK: usize = 64 << 20;
+
 /// Asks a person to confirm `text`: true for yes.
-pub type Confirm<'a> = &'a mut dyn FnMut(&str) -> io::Result<bool>;
+pub type Confirm<'a> = &'a mut (dyn FnMut(&str) -> io::Result<bool> + Send);
 
 /// Ask on the controlling terminal, not on stdin, which can hold a task prompt.
 pub fn tty_confirm(text: &str) -> io::Result<bool> {
@@ -296,7 +352,13 @@ pub fn tty_confirm(text: &str) -> io::Result<bool> {
 }
 
 /// Parse `args` (including argv[0]) and run. Returns the exit code.
-pub fn run<I, T>(args: I, stdin: &mut dyn Read, stdout: &mut dyn Write, stderr: &mut dyn Write, confirm: Confirm) -> i32
+pub fn run<I, T>(
+    args: I,
+    stdin: &mut (dyn Read + Send),
+    stdout: &mut (dyn Write + Send),
+    stderr: &mut dyn Write,
+    confirm: Confirm,
+) -> i32
 where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
@@ -309,14 +371,23 @@ where
             return e.exit_code();
         }
     };
-    let runtime = match tokio::runtime::Runtime::new() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().thread_stack_size(STACK).build() {
         Ok(r) => r,
         Err(e) => {
             let _ = writeln!(stderr, "error: {e}");
             return 1;
         }
     };
-    match runtime.block_on(execute(cli, stdin, stdout, confirm)) {
+    // Dialog's sync futures are deep: run on a thread with room for them.
+    let result = std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(STACK)
+            .spawn_scoped(scope, || runtime.block_on(execute(cli, stdin, stdout, confirm)))
+            .expect("a thread")
+            .join()
+            .expect("the command thread")
+    });
+    match result {
         Ok(()) => 0,
         Err(err) => {
             if let Some(io_err) = err.downcast_ref::<io::Error>()
@@ -506,6 +577,52 @@ async fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: C
                 }
                 FeedCmd::Pull { feed: only } => print_json(out, &feed::pull(&v, only.as_deref()).await?)?,
             }
+        }
+        Command::Remote(cmd) => {
+            let v = open(&dir, &cli.session).await?;
+            let space = |public: bool| if public { peer::PUBLIC } else { "vault" };
+            match cmd {
+                RemoteCmd::Add { name, folder, public } => {
+                    print_json(out, &peer::add_remote(&v, space(public), &name, &folder).await?)?
+                }
+                RemoteCmd::List => print_json(out, &peer::remotes(&v).await?)?,
+                RemoteCmd::Rm { name, public } => peer::rm_remote(&v, space(public), &name).await?,
+            }
+        }
+        Command::Pull => print_json(out, &peer::sync(&open(&dir, &cli.session).await?, false).await?)?,
+        Command::Sync => print_json(out, &peer::sync(&open(&dir, &cli.session).await?, true).await?)?,
+        Command::Device(cmd) => {
+            let v = open(&dir, &cli.session).await?;
+            match cmd {
+                DeviceCmd::Id => writeln!(out, "{}", v.device())?,
+                DeviceCmd::Add { did } => {
+                    for f in peer::device_add(&v, &did).await? {
+                        writeln!(out, "wrote {}", f.display())?;
+                    }
+                    writeln!(out, "On that device: dreams remote add <name> <folder>")?;
+                }
+            }
+        }
+        Command::Peer(cmd) => {
+            let v = open(&dir, &cli.session).await?;
+            match cmd {
+                PeerCmd::Add { name, folder } => print_json(out, &peer::follow(&v, &name, &folder).await?)?,
+                PeerCmd::List => {
+                    let peers: Vec<_> =
+                        peer::remotes(&v).await?.into_iter().filter(|r| r.space.starts_with("peer-")).collect();
+                    print_json(out, &peers)?;
+                }
+                PeerCmd::Rm { name } => peer::rm_remote(&v, &format!("peer-{name}"), &name).await?,
+                PeerCmd::Grant { did } => {
+                    for f in peer::peer_grant(&v, &did).await? {
+                        writeln!(out, "wrote {}", f.display())?;
+                    }
+                }
+            }
+        }
+        Command::Publish { note: href } => {
+            let v = open(&dir, &cli.session).await?;
+            print_json(out, &peer::publish(&v, &href).await?)?;
         }
         Command::Tick => {
             let v = open(&dir, &cli.session).await?;

@@ -77,6 +77,8 @@ fn ok(v: impl Serialize) -> Result<CallToolResult, McpError> {
 pub struct DescribeParams {
     /// Only relations starting with this, e.g. `dreams.task` or `me.recipes`.
     pub domain: Option<String>,
+    /// A followed vault's petname. Default: this vault.
+    pub vault: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -86,6 +88,8 @@ pub struct QueryParams {
     pub rule: Json,
     /// Most rows to return. Default 100, max 1000.
     pub limit: Option<usize>,
+    /// A followed vault's petname. Default: this vault. Queries don't join across vaults.
+    pub vault: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -227,7 +231,7 @@ impl Server {
         entity has several values (read those with \"pick\": \"all:\"). Also the concepts, by name, and the installed rules. \
         Call this before you write a query, and copy descriptors exactly.")]
     async fn describe(&self, Parameters(p): Parameters<DescribeParams>) -> Result<CallToolResult, McpError> {
-        ok(describe::describe(&self.vault, p.domain.as_deref()).await.map_err(to_mcp)?)
+        ok(describe::describe(&*self.on(p.vault.as_deref()).await?, p.domain.as_deref()).await.map_err(to_mcp)?)
     }
 
     #[tool(description = "Run a Dialog datalog query once, read-only. `rule` is a deductive rule in formal notation: \
@@ -236,7 +240,8 @@ impl Server {
         ({\"assert\": {\"concept\": \"task\"}, \"where\": {...}}), or a constraint (==, <, >=, text/like). Variables are \
         {\"?\": {\"name\": \"x\"}}. Returns rows keyed by the `find` names. See the dialog skill for recipes.")]
     async fn query(&self, Parameters(p): Parameters<QueryParams>) -> Result<CallToolResult, McpError> {
-        let rows = notation::query(&self.vault, &p.rule, p.limit.unwrap_or(DEFAULT_LIMIT)).await.map_err(to_mcp)?;
+        let vault = self.on(p.vault.as_deref()).await?;
+        let rows = notation::query(&vault, &p.rule, p.limit.unwrap_or(DEFAULT_LIMIT)).await.map_err(to_mcp)?;
         ok(json!({ "rows": rows }))
     }
 
@@ -526,6 +531,14 @@ impl Server {
         let mut requests = InputRequests::new();
         requests.insert(CONFIRM_KEY.to_string(), request);
         Ok(InputRequiredResult::new(Some(requests), Some(key)).into())
+    }
+
+    /// This vault, or a followed one by petname.
+    async fn on(&self, petname: Option<&str>) -> Result<Arc<Vault>, McpError> {
+        match petname {
+            None => Ok(self.vault.clone()),
+            Some(name) => Ok(Arc::new(crate::peer::followed(&self.vault, name).await.map_err(to_mcp)?)),
+        }
     }
 
     async fn skill(&self, uri: &str) -> Result<Skill, McpError> {

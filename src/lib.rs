@@ -12,6 +12,7 @@ pub mod import;
 pub mod markdown;
 pub mod mcp;
 pub mod notation;
+pub mod peer;
 pub mod note;
 pub mod prompt;
 pub mod resolve;

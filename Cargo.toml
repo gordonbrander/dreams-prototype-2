@@ -12,9 +12,11 @@ dialog-capability = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.
 dialog-credentials = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-effects = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-peer = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-remote-fs = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-query = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-repository = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-storage = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-ucan-core = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-varsig = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 anyhow = "1"
 diffy = "0.5"
