@@ -1,7 +1,7 @@
 ---
-_type: doc://schemas/skill.json
-name: dreams
-description: "How the Dreams vault works, and how to set up scheduled tasks, runners, skills, prompts, and feeds in it. Use before you set up, automate, schedule, or configure anything in Dreams, or when the user asks how Dreams works."
+dreams.skill:
+  name: dreams
+  description: "How the Dreams vault works, and how to set up scheduled tasks, runners, skills, prompts, and feeds in it. Use before you set up, automate, schedule, or configure anything in Dreams, or when the user asks how Dreams works."
 ---
 # Dreams
 
@@ -67,7 +67,8 @@ A task wakes an agent on a schedule, with a prompt. A task note is a template. I
 8. Tell the user what runs, how often, with which runner, and in which folder.
 
 After the task is set up:
-- An edit to a task or its runner runs only after the next deploy. `list_tasks` shows the task as changed until then.
+- A deploy freezes the task and its runner as a version. The deployed version keeps running after an edit, and the edit runs only after the next deploy. `list_tasks` shows `changed: true` until then.
+- Each receipt links the version that ran in `dreams.run/version`. Read it with `get_note` to see exactly what ran.
 - To stop a task on this vault, call `disable_task`. To start it again, call `deploy_task`.
 - To remove a task, call `delete_note`. Its receipts stay.
 

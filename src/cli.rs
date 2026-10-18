@@ -723,7 +723,8 @@ async fn task_cmd(
                     .iter()
                     .map(|t| {
                         let every = t.task.as_ref().map(|x| x.every.clone()).unwrap_or_default();
-                        vec![t.path.clone(), t.status.clone(), every, t.due.to_string(), t.error.clone().unwrap_or_default()]
+                        let status = if t.changed { format!("{} (changed)", t.status) } else { t.status.clone() };
+                        vec![t.path.clone(), status, every, t.due.to_string(), t.error.clone().unwrap_or_default()]
                     })
                     .collect();
                 table(out, &["TASK", "STATUS", "EVERY", "DUE", "ERROR"], &rows)?;

@@ -54,8 +54,23 @@ async fn deploy(v: &Vault) {
     assert!(task::plan(v, Some("tasks/t.json")).await.unwrap().is_empty(), "deployed as it is");
 }
 
+/// The task version a run ran.
+fn ran(run: &note::Note) -> dialog_artifacts::Value {
+    run.first(task::RUN_VERSION).cloned().expect("a receipt links its version")
+}
+
+/// The newest run's prompt and version, after one requested tick.
+async fn run_once(v: &Vault) -> (String, dialog_artifacts::Value) {
+    task::request_run(v, "tasks/t.json").await.unwrap();
+    let report = task::tick(v).await.unwrap();
+    assert_eq!(report.fired.len(), 1, "{report:?}");
+    assert_eq!(report.fired[0].exit_code, Some(0), "{report:?}");
+    let run = task::runs(v, "tasks/t.json").await.unwrap().remove(0);
+    (run.text(note::CONTENT).unwrap().to_string(), ran(&run))
+}
+
 #[tokio::test]
-async fn a_requested_run_writes_a_receipt_and_an_edit_needs_a_redeploy() {
+async fn an_edit_keeps_the_deployed_version_running() {
     let s = sandbox();
     let v = Vault::open(&s.0).await.unwrap();
     setup(&v, "1h", None).await;
@@ -63,26 +78,45 @@ async fn a_requested_run_writes_a_receipt_and_an_edit_needs_a_redeploy() {
     deploy(&v).await;
 
     assert!(task::tick(&v).await.unwrap().fired.is_empty(), "not due for an hour");
-    task::request_run(&v, "tasks/t.json").await.unwrap();
-    let report = task::tick(&v).await.unwrap();
-    assert_eq!(report.fired.len(), 1, "{report:?}");
-    let fired = &report.fired[0];
-    assert_eq!(fired.exit_code, Some(0), "{fired:?}");
-    assert!(fired.run.starts_with("runs/tasks/t/"));
-
+    let (prompt, first) = run_once(&v).await;
+    assert_eq!(prompt, "look");
     let runs = task::runs(&v, "tasks/t.json").await.unwrap();
-    assert_eq!(runs.len(), 1);
-    assert_eq!(runs[0].text(note::CONTENT), Some("look"));
+    assert!(runs[0].path().unwrap().starts_with("runs/tasks/t/"));
     assert!(runs[0].is_protected());
     assert!(task::tick(&v).await.unwrap().fired.is_empty(), "the request was used up");
 
-    // An edit shows as changed and doesn't run until deployed again.
+    // An edit shows as changed, and the deployed version keeps running.
     put(&v, "tasks/t.json", None, &[("dreams.task/prompt", json!("look again"))]).await;
     let list = task::list(&v).await.unwrap();
     let t = list.tasks.iter().find(|t| t.path == "tasks/t.json").unwrap();
-    assert_eq!(t.status, "changed");
-    assert!(task::plan(&v, Some("tasks/t.json")).await.unwrap()[0].now == "changed");
+    assert_eq!((t.status.as_str(), t.changed), ("deployed", true));
+    assert_eq!(task::plan(&v, Some("tasks/t.json")).await.unwrap()[0].now, "changed");
     assert!(!list.scheduler.stale, "tick records itself");
+    assert_eq!(run_once(&v).await, ("look".to_string(), first.clone()));
+
+    // A redeploy runs the edit, as a new version.
+    deploy(&v).await;
+    let (prompt, second) = run_once(&v).await;
+    assert_eq!(prompt, "look again");
+    assert_ne!(second, first);
+
+    // Versions are not tasks, and only the task is a task to a query.
+    assert_eq!(task::entities(&v).await.unwrap().len(), 1);
+    let q = json!({"deduce": {"find": ["t", "path"]},
+        "when": [{"assert": {"concept": "task"}, "where": {"this": {"?": {"name": "t"}}, "path": {"?": {"name": "path"}}}}]});
+    let rows = dreams::notation::query(&v, &q, 10).await.unwrap();
+    assert_eq!(rows.len(), 1, "{rows:?}");
+
+    // A version is read-only over MCP, and an altered one doesn't run.
+    let dialog_artifacts::Value::Entity(version) = second else { panic!("an entity") };
+    assert!(note::load(&v, &version).await.unwrap().is_protected());
+    assert!(note::writable("dreams.version/source", false).is_err());
+    let extra = dreams::vault::assert(&version, "dreams.task/cwd", dialog_artifacts::Value::String("/tmp".into()), dialog_artifacts::Pick::Last);
+    v.write_unstamped(vec![extra.unwrap()]).await.unwrap();
+    task::request_run(&v, "tasks/t.json").await.unwrap();
+    let t = task::evaluate(&v, &note::resolve(&v, "tasks/t.json").await.unwrap(), dreams::vault::now_ms()).await.unwrap();
+    assert!(t.error.as_deref().is_some_and(|e| e.contains("altered")), "{:?}", t.error);
+    assert!(task::tick(&v).await.unwrap().fired.is_empty());
 }
 
 #[tokio::test]

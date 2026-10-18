@@ -1,7 +1,7 @@
 ---
-_type: doc://schemas/skill.json
-name: daily-note
-description: "Create, add to, or find daily notes: one note per day, with the date as its path. Use when the user mentions today's note, a daily note, a journal, or a log for a day."
+dreams.skill:
+  name: daily-note
+  description: "Create, add to, or find daily notes: one note per day, with the date as its path. Use when the user mentions today's note, a daily note, a journal, or a log for a day."
 ---
 # Daily notes
 

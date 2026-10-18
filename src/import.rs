@@ -2,8 +2,10 @@
 //!
 //! A file's path is its note's path. A document is JSON, YAML, or Markdown
 //! with YAML frontmatter. Two shapes are read:
-//! - the spike's: flat keys, `_type: doc://schemas/<x>.json`, `doc://` refs;
-//! - dreams' own (what `export` and `get_note` write): keys grouped by domain.
+//! - dreams' own (what `export` and `get_note` write, and the seeds use):
+//!   keys grouped by domain, with `dreams:///<path>` links;
+//! - the old prototype's, for migrating its vaults only: flat keys,
+//!   `_type: doc://schemas/<x>.json`, and `doc://` links.
 
 use std::path::{Path, PathBuf};
 
@@ -113,7 +115,7 @@ pub async fn import(vault: &Vault, docs: &[(String, String)], opts: &Options) ->
         }
         results.push(result);
     }
-    // Second pass: `doc://` references, now that every note has an entity.
+    // Second pass: `dreams:///` and `doc://` links, now that every note has an entity.
     let mut changes = Vec::new();
     for r in refs {
         let target = r.href.strip_prefix("doc://").unwrap_or(&r.href);
@@ -206,7 +208,7 @@ fn field(
         note::LINK | note::DANGLING | note::CREATED | vault::UPDATED | vault::BY => {}
         _ => match v {
             Json::Null => {}
-            Json::String(s) if s.starts_with("doc://") => {
+            Json::String(s) if s.starts_with("dreams:///") || s.starts_with("doc://") => {
                 refs.push(Ref { of: of.clone(), the: the.into(), href: s.clone(), file })
             }
             // The spike's task filters become a query.

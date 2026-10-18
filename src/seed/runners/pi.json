@@ -1,11 +1,12 @@
 {
-  "_type": "doc://schemas/runner.json",
   "title": "Pi, print mode",
-  "command": [
-    "pi",
-    "-p",
-    "--no-extensions",
-    "-"
-  ],
-  "timeout": "10m"
+  "dreams.runner": {
+    "command": [
+      "pi",
+      "-p",
+      "--no-extensions",
+      "-"
+    ],
+    "timeout": "10m"
+  }
 }

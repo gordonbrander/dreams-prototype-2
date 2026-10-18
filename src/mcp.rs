@@ -388,7 +388,8 @@ impl Server {
     }
 
     #[tool(description = "Every task with its state on this device: `status` is dormant (never deployed here), deployed, \
-        disabled, or changed (edited since the deploy: it does not run until deployed again); `due` says whether the next \
+        or disabled; `changed` is true when the task or its runner was edited since the deploy (the deployed version \
+        keeps running; the edit runs after the next deploy); `due` says whether the next \
         tick fires it, and `error` why it cannot run. `scheduler.stale` is true when no scheduler ticked in five minutes: \
         then nothing fires, and the person must run `dreams daemon install`.")]
     async fn list_tasks(&self) -> Result<CallToolResult, McpError> {
@@ -525,7 +526,7 @@ impl Server {
         }
         let mut message = String::from(
             "An agent asks to deploy these tasks on this device. Each runs on its schedule with exactly this \
-             prompt and command until you deploy again or disable it.\n\n",
+             prompt and command, even after edits, until you deploy again or disable it.\n\n",
         );
         message.push_str(&plan.iter().map(Deploy::describe).collect::<Vec<_>>().join("\n"));
         // No fields: the client shows only Accept and Decline.

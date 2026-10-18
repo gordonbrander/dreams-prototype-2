@@ -1,10 +1,14 @@
-//! Scheduled tasks (SPEC §10): entities with the Task concept's attributes
+//! Scheduled tasks (SPEC §10): notes with the Task concept's attributes
 //! that wake an agent every interval, or when the rows of their `when`
-//! query change. A task syncs, but runs only where it is deployed. Deploy
-//! state lives in the local repository, one entity per task. A deploy
-//! records the hash of the task's and runner's facts; a task whose facts
-//! changed since does not run until it is deployed again. Each run writes
-//! a receipt, a Run entity, which syncs.
+//! query change. A task syncs, but runs only where it is deployed.
+//!
+//! A deploy freezes the task and its runner as **versions**: entities whose
+//! id is the hash of their own facts, linked to what they freeze by
+//! `dreams.version/source`. The deploy, in the local repository, points
+//! at the task version, and the scheduler runs that version, never the
+//! live note. An edit marks the task `changed`; the deployed version keeps
+//! running until the next deploy. Each run writes a receipt, a Run entity
+//! linking the version that ran, which syncs.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -18,7 +22,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value as Json, json};
 
 use crate::error::{Error, Result};
-use crate::hash::sha256_hex;
 use crate::notation::{self, MAX_LIMIT};
 use crate::note::{self, Note, Put};
 use crate::runner::{self, Context, Outcome, Runner, parse_duration};
@@ -32,6 +35,7 @@ pub const PROMPT: &str = "dreams.task/prompt";
 pub const WHEN: &str = "dreams.task/when";
 pub const CWD: &str = "dreams.task/cwd";
 pub const RUN_TASK: &str = "dreams.run/task";
+pub const RUN_VERSION: &str = "dreams.run/version";
 
 /// Agent output above this is cut, and the run records the cut.
 pub const MAX_CONTENT_BYTES: usize = 512 * 1024;
@@ -83,37 +87,24 @@ impl Task {
     }
 }
 
-/// Every task entity in the vault.
+/// Every task in the vault: notes with a runner. Versions have no path.
 pub async fn entities(vault: &Vault) -> Result<Vec<Entity>> {
-    let mut out: Vec<Entity> =
-        vault.claims(ArtifactSelector::new().the(vault::relation(RUNNER)?)).await?.into_iter().map(|a| a.of).collect();
-    out.dedup();
+    let mut out = Vec::new();
+    for a in vault.claims(ArtifactSelector::new().the(vault::relation(RUNNER)?)).await? {
+        if !out.contains(&a.of) && !vault.values(&a.of, note::PATH).await?.is_empty() {
+            out.push(a.of);
+        }
+    }
     Ok(out)
 }
 
-/// The hash of what a deploy confirms: the task's and its runner's facts,
-/// sorted, without the stamps every write changes.
-fn facts_hash(task: &Note, runner: &Note) -> String {
-    let mut lines = Vec::new();
-    for (who, note) in [("task", task), ("runner", runner)] {
-        for (the, values) in &note.facts {
-            if [vault::UPDATED, vault::BY, note::CREATED].contains(&the.as_str()) {
-                continue;
-            }
-            for v in values {
-                lines.push(format!("{who}\t{the}\t{}", to_json(v)));
-            }
-        }
-    }
-    lines.sort();
-    sha256_hex(lines.join("\n").as_bytes())
-}
-
-/// A task, its runner and their hash, as they are now.
+/// A live task and its runner, and the version they make.
 pub struct Loaded {
     pub task: Task,
     pub runner: std::result::Result<Runner, String>,
-    pub hash: String,
+    /// The task version, and the facts that write it with its runner
+    /// version. None when the runner is missing or broken.
+    pub version: Option<(Entity, Vec<Instruction>)>,
 }
 
 pub async fn load(vault: &Vault, entity: &Entity) -> Result<Loaded> {
@@ -128,18 +119,85 @@ pub async fn load(vault: &Vault, entity: &Entity) -> Result<Loaded> {
     } else {
         Runner::from_note(&runner_note).map_err(|e| e.to_string())
     };
-    Ok(Loaded { hash: facts_hash(&note, &runner_note), task, runner })
+    let version = match runner {
+        Ok(_) => Some(make_version(&note, &runner_note)?),
+        Err(_) => None,
+    };
+    Ok(Loaded { task, runner, version })
+}
+
+// ---- versions -------------------------------------------------------------
+
+/// Links a version to the task or runner it freezes.
+pub const SOURCE: &str = "dreams.version/source";
+
+/// What a version copies from its task, besides the runner.
+const TASK_FIELDS: [&str; 4] = [EVERY, PROMPT, WHEN, CWD];
+const RUNNER_FIELDS: [&str; 2] = [runner::COMMAND, runner::TIMEOUT];
+
+/// A version's id: the hash of every one of its facts.
+fn version_id(facts: &[(String, Value)]) -> Entity {
+    let mut pairs: Vec<(&str, String)> = facts.iter().map(|(the, is)| (the.as_str(), to_json(is).to_string())).collect();
+    pairs.sort();
+    Entity::of(&("dreams.version", pairs))
+}
+
+/// Freeze the current value of each of `fields` of `note`, plus `extra`.
+fn freeze(note: &Note, fields: &[&str], extra: Option<(&str, Value)>) -> Result<(Entity, Vec<Instruction>)> {
+    let mut facts = vec![(SOURCE.to_string(), Value::Entity(note.entity.clone()))];
+    facts.extend(fields.iter().filter_map(|the| note.first(the).map(|v| (the.to_string(), v.clone()))));
+    facts.extend(extra.map(|(the, v)| (the.to_string(), v)));
+    let id = version_id(&facts);
+    let changes = facts.into_iter().map(|(the, is)| assert(&id, &the, is, Pick::Last)).collect::<Result<_>>()?;
+    Ok((id, changes))
+}
+
+/// The version of `task` with `runner`, and the facts that write both
+/// versions. The task version links the runner version, so its id
+/// covers the runner's command too.
+fn make_version(task: &Note, runner: &Note) -> Result<(Entity, Vec<Instruction>)> {
+    let (r, mut changes) = freeze(runner, &RUNNER_FIELDS, None)?;
+    let (t, more) = freeze(task, &TASK_FIELDS, Some((RUNNER, Value::Entity(r))))?;
+    changes.extend(more);
+    Ok((t, changes))
+}
+
+/// A version's facts, refused when they no longer hash to its id.
+async fn thaw(vault: &Vault, version: &Entity) -> Result<Note> {
+    let note = note::load(vault, version).await?;
+    let facts: Vec<(String, Value)> =
+        note.facts.iter().flat_map(|(the, vs)| vs.iter().map(move |v| (the.clone(), v.clone()))).collect();
+    if facts.is_empty() || version_id(&facts) != *version {
+        return Err(Error::invalid(format!("version {version} is missing or was altered; deploy again")));
+    }
+    Ok(note)
+}
+
+/// The task and runner a version froze. The task keeps the live task's
+/// entity, path and title, so runs keep its session and receipt folder.
+/// A deleted runner stops the version too.
+async fn load_version(vault: &Vault, version: &Entity, live: &Note) -> Result<(Task, Runner)> {
+    let mut task = Task::from_note(&thaw(vault, version).await?)?;
+    let runner = thaw(vault, &task.runner).await?;
+    if let Some(Value::Entity(source)) = runner.first(SOURCE)
+        && vault.values(source, note::PATH).await?.is_empty()
+    {
+        return Err(Error::invalid("its runner was deleted"));
+    }
+    task.entity = live.entity.clone();
+    task.path = live.path().unwrap_or_default().to_string();
+    task.title = live.text(note::TITLE).map(str::to_string);
+    Ok((task, Runner::from_note(&runner)?))
 }
 
 // ---- deploy state (local repository) -----------------------------------
 
-const HASH: &str = "dreams.deploy/hash";
+const VERSION: &str = "dreams.deploy/version";
 const ENABLED: &str = "dreams.deploy/enabled";
 const ENABLED_AT: &str = "dreams.deploy/enabled-at";
 const LAST_RUN: &str = "dreams.deploy/last-run";
 const LEASE_UNTIL: &str = "dreams.deploy/lease-until";
 const REQUESTED: &str = "dreams.deploy/requested";
-const QUERY: &str = "dreams.deploy/query";
 const ROWS: &str = "dreams.deploy/rows";
 const SESSION: &str = "dreams.deploy/session";
 const PENDING: &str = "dreams.deploy/pending";
@@ -148,8 +206,8 @@ const LAST_TICK: &str = "dreams.scheduler/last-tick";
 /// This device's schedule for one task.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 pub struct State {
-    /// The hash of the task and runner as deployed.
-    pub hash: String,
+    /// The task version this device runs; empty before a deploy.
+    pub version: String,
     pub enabled: bool,
     /// Unix ms. The schedule counts from here until the first run.
     pub enabled_at: u64,
@@ -159,9 +217,6 @@ pub struct State {
     pub lease_until: u64,
     /// The next tick fires the task, whatever its schedule says.
     pub requested: bool,
-    /// The `when` query the rows below are of.
-    #[serde(skip)]
-    pub query: String,
     /// The `when` query's rows at the last run.
     #[serde(skip)]
     pub rows: Vec<Json>,
@@ -196,13 +251,12 @@ pub async fn state(vault: &Vault, task: &Entity) -> Result<Option<State>> {
     let rows = text(ROWS);
     let pending = text(PENDING);
     Ok(Some(State {
-        hash: text(HASH),
+        version: text(VERSION),
         enabled: yes(ENABLED),
         enabled_at: n(ENABLED_AT),
         last_run: n(LAST_RUN),
         lease_until: n(LEASE_UNTIL),
         requested: yes(REQUESTED),
-        query: text(QUERY),
         rows: if rows.is_empty() { Vec::new() } else { serde_json::from_str(&rows)? },
         session: text(SESSION),
         pending: if pending.is_empty() { None } else { Some(serde_json::from_str(&pending)?) },
@@ -221,13 +275,12 @@ fn state_changes(task: &Entity, s: &State) -> Result<Vec<Instruction>> {
     };
     [
         ("dreams.deploy/task", Value::Entity(task.clone())),
-        (HASH, text(s.hash.clone())),
+        (VERSION, text(s.version.clone())),
         (ENABLED, Value::Boolean(s.enabled)),
         (ENABLED_AT, n(s.enabled_at)),
         (LAST_RUN, n(s.last_run)),
         (LEASE_UNTIL, n(s.lease_until)),
         (REQUESTED, Value::Boolean(s.requested)),
-        (QUERY, text(s.query.clone())),
         (ROWS, text(serde_json::to_string(&s.rows)?)),
         (SESSION, text(s.session.clone())),
         (PENDING, text(pending)),
@@ -248,7 +301,8 @@ async fn save(vault: &Vault, task: &Entity, s: &State) -> Result<()> {
 pub struct Deploy {
     pub path: String,
     pub entity: String,
-    pub hash: String,
+    /// The task version a deploy freezes: the id of exactly what is shown.
+    pub version: String,
     pub runner: String,
     pub command: Vec<String>,
     pub every: String,
@@ -256,7 +310,7 @@ pub struct Deploy {
     pub prompt: String,
     pub cwd: Option<String>,
     pub timeout: String,
-    /// What is deployed now: dormant, deployed, disabled or changed.
+    /// What is deployed now: dormant, deployed, disabled, or changed (another version is deployed).
     pub now: String,
 }
 
@@ -280,13 +334,19 @@ impl Deploy {
     }
 }
 
-fn status(state: Option<&State>, hash: &str) -> &'static str {
+/// dormant (never deployed here), deployed, or disabled.
+fn status(state: Option<&State>) -> &'static str {
     match state {
         None => "dormant",
-        Some(s) if s.hash != hash && !s.hash.is_empty() => "changed",
+        Some(s) if s.version.is_empty() => "dormant",
         Some(s) if s.enabled => "deployed",
         Some(_) => "disabled",
     }
+}
+
+/// Whether the live task makes a version other than the deployed one.
+fn changed(state: Option<&State>, live: Option<&str>) -> bool {
+    state.is_some_and(|s| !s.version.is_empty() && live != Some(s.version.as_str()))
 }
 
 /// What a deploy would change: one task, or every task that is not
@@ -298,20 +358,22 @@ pub async fn plan(vault: &Vault, href: Option<&str>) -> Result<Vec<Deploy>> {
     };
     let mut out = Vec::new();
     for entity in entities {
-        let Loaded { task, runner, hash } = load(vault, &entity).await?;
+        let Loaded { task, runner, version } = load(vault, &entity).await?;
         let runner = runner.map_err(Error::invalid)?;
+        let version = version.map(|(v, _)| v.to_string()).unwrap_or_default();
         let current = state(vault, &entity).await?;
-        if current.as_ref().is_some_and(|s| s.enabled && s.hash == hash) {
+        if current.as_ref().is_some_and(|s| s.enabled && s.version == version) {
             continue;
         }
         if let Some(when) = &task.when {
             notation::parse(&Json::String(when.clone()))?;
         }
+        let now = if changed(current.as_ref(), Some(&version)) { "changed" } else { status(current.as_ref()) };
         out.push(Deploy {
             path: task.path.clone(),
             entity: entity.to_string(),
-            now: status(current.as_ref(), &hash).into(),
-            hash,
+            now: now.into(),
+            version,
             runner: runner.path,
             command: runner.command,
             every: task.every,
@@ -324,11 +386,11 @@ pub async fn plan(vault: &Vault, href: Option<&str>) -> Result<Vec<Deploy>> {
     Ok(out)
 }
 
-/// Whether every task in `plan` is still as planned.
+/// Whether every task in `plan` still makes the version shown.
 pub async fn is_current(vault: &Vault, plan: &[Deploy]) -> Result<bool> {
     for d in plan {
         match load(vault, &value::entity(&d.entity)?).await {
-            Ok(l) if l.hash == d.hash => {}
+            Ok(l) if l.version.as_ref().is_some_and(|(v, _)| v.to_string() == d.version) => {}
             Ok(_) | Err(Error::NotFound { .. }) => return Ok(false),
             Err(e) => return Err(e),
         }
@@ -336,26 +398,33 @@ pub async fn is_current(vault: &Vault, plan: &[Deploy]) -> Result<bool> {
     Ok(true)
 }
 
-/// Deploy a confirmed plan. Fails when a task or runner changed since the
-/// plan was made. A first deploy starts the schedule now, and takes the
-/// `when` query's current rows as seen, so it does not fire on history.
+/// Deploy a confirmed plan: write each version to the vault, and point
+/// this device's deploy at it. Fails when a task or runner changed since
+/// the plan was made. A first deploy starts the schedule now, and takes
+/// the `when` query's current rows as seen, so it does not fire on
+/// history; a redeploy keeps the rows unless `when` changed.
 pub async fn apply(vault: &Vault, plan: &[Deploy]) -> Result<Vec<String>> {
     if !is_current(vault, plan).await? {
         return Err(Error::invalid("a task or runner changed since you confirmed; deploy again"));
     }
     for d in plan {
         let entity = value::entity(&d.entity)?;
+        if let Some((_, facts)) = load(vault, &entity).await?.version {
+            vault.write_unstamped(facts).await?;
+        }
         let mut s = state(vault, &entity).await?.unwrap_or(State { enabled_at: now_ms(), ..Default::default() });
-        s.hash = d.hash.clone();
-        s.enabled = true;
-        let query = d.when.clone().unwrap_or_default();
-        if s.query != query {
+        let old_when = match value::entity(&s.version) {
+            Ok(v) if !s.version.is_empty() => thaw(vault, &v).await.ok().and_then(|n| n.text(WHEN).map(str::to_string)),
+            _ => None,
+        };
+        if s.version.is_empty() || old_when != d.when {
             s.rows = match &d.when {
                 Some(w) => rows(vault, w).await?,
                 None => Vec::new(),
             };
-            s.query = query;
         }
+        s.version = d.version.clone();
+        s.enabled = true;
         save(vault, &entity, &s).await?;
     }
     Ok(plan.iter().map(|d| d.path.clone()).collect())
@@ -397,9 +466,11 @@ pub struct Evaluation {
     pub entity: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// dormant, deployed, disabled, or changed (edited since the deploy:
-    /// it does not run until deployed again).
+    /// dormant (never deployed here), deployed, or disabled.
     pub status: String,
+    /// The task or its runner was edited since the deploy. The deployed
+    /// version keeps running; the edit runs after the next deploy.
+    pub changed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub state: Option<State>,
     pub running: bool,
@@ -420,9 +491,15 @@ pub struct Evaluation {
     #[serde(skip)]
     #[schemars(skip)]
     pub runner: Option<Runner>,
+    /// The task version that runs: the deployed one, or for a task not
+    /// deployed here, the one the live task makes. Empty without a runner.
     #[serde(skip)]
     #[schemars(skip)]
-    pub hash: String,
+    pub version: String,
+    /// `version` is stored already; else firing writes it first.
+    #[serde(skip)]
+    #[schemars(skip)]
+    pub stored: bool,
     /// The query's rows now, when they were read: the next `rows` once a run finishes.
     #[serde(skip)]
     #[schemars(skip)]
@@ -444,42 +521,47 @@ async fn written_by(vault: &Vault, row: &Json, session: &str) -> Result<bool> {
 }
 
 pub async fn evaluate(vault: &Vault, entity: &Entity, now: u64) -> Result<Evaluation> {
-    let Loaded { task, runner, hash } = match load(vault, entity).await {
-        Ok(l) => l,
-        Err(Error::NotFound { what }) => return Err(Error::NotFound { what }),
-        Err(e) => {
-            let note = note::load(vault, entity).await?;
-            return Ok(Evaluation {
-                path: note.path().unwrap_or_default().into(),
-                entity: entity.to_string(),
-                title: note.text(note::TITLE).map(str::to_string),
-                status: "invalid".into(),
-                state: None,
-                running: false,
-                time_due: false,
-                due: false,
-                added: vec![],
-                removed: vec![],
-                error: Some(e.to_string()),
-                task: None,
-                runner: None,
-                hash: String::new(),
-                rows: None,
-            });
+    let note = note::load(vault, entity).await?;
+    if note.facts.is_empty() {
+        return Err(Error::not_found(entity.to_string()));
+    }
+    let state = state(vault, entity).await?;
+    let live = load(vault, entity).await;
+    let live_version = live.as_ref().ok().and_then(|l| l.version.as_ref()).map(|(v, _)| v.to_string());
+    let deployed = state.as_ref().map(|s| s.version.clone()).filter(|v| !v.is_empty());
+    // A deployed task runs its version; any other runs as it is now.
+    let (run, version, stored) = match &deployed {
+        Some(v) => {
+            let run = match value::entity(v) {
+                Ok(e) => load_version(vault, &e, &note).await,
+                Err(e) => Err(e),
+            };
+            (run.map_err(|e| e.to_string()), v.clone(), true)
+        }
+        None => {
+            let run = match &live {
+                Ok(l) => l.runner.clone().map(|r| (l.task.clone(), r)),
+                Err(e) => Err(e.to_string()),
+            };
+            (run, live_version.clone().unwrap_or_default(), false)
         }
     };
-    let state = state(vault, entity).await?;
-    let status = status(state.as_ref(), &hash);
-    let mut error = runner.as_ref().err().cloned();
+    let mut error = run.as_ref().err().cloned();
+    let (task, runner) = match run {
+        Ok((t, r)) => (Some(t), Some(r)),
+        Err(_) => (live.as_ref().ok().map(|l| l.task.clone()), None),
+    };
+    let status = status(state.as_ref());
     let (mut running, mut time_due, mut due) = (false, false, false);
     let (mut added, mut removed, mut rows_now) = (Vec::new(), Vec::new(), None);
-    if let Some(s) = &state {
+    if let (Some(s), Some(task)) = (&state, &task) {
         running = s.lease_until > now;
         let since = if s.last_run > 0 { s.last_run } else { s.enabled_at };
         time_due = now.saturating_sub(since) >= task.every_secs * 1000;
         let mut changed = true;
         if let Some(when) = &task.when
             && status == "deployed"
+            && error.is_none()
             && (time_due || s.requested)
         {
             match rows(vault, when).await {
@@ -503,10 +585,11 @@ pub async fn evaluate(vault: &Vault, entity: &Entity, now: u64) -> Result<Evalua
         due = status == "deployed" && !running && error.is_none() && (s.requested || (time_due && changed));
     }
     Ok(Evaluation {
-        path: task.path.clone(),
+        path: note.path().unwrap_or_default().into(),
         entity: entity.to_string(),
-        title: task.title.clone(),
+        title: note.text(note::TITLE).map(str::to_string),
         status: status.into(),
+        changed: changed(state.as_ref(), live_version.as_deref()),
         state,
         running,
         time_due,
@@ -514,9 +597,10 @@ pub async fn evaluate(vault: &Vault, entity: &Entity, now: u64) -> Result<Evalua
         added,
         removed,
         error,
-        runner: runner.ok(),
-        task: Some(task),
-        hash,
+        task,
+        runner,
+        version,
+        stored,
         rows: rows_now,
     })
 }
@@ -562,7 +646,7 @@ async fn claim(vault: &Vault, eval: &Evaluation, task: &Task, now: u64, force: b
     let lease = eval.runner.as_ref().map_or(0, |r| r.timeout_secs) * 1000 + 60_000;
     for _ in 0..CLAIM_TRIES {
         let current = state(vault, &task.entity).await?;
-        let mut s = current.clone().unwrap_or(State { hash: eval.hash.clone(), enabled_at: now, ..Default::default() });
+        let mut s = current.clone().unwrap_or(State { enabled_at: now, ..Default::default() });
         let seen = eval.state.as_ref().map_or(0, |s| s.last_run);
         if !force && (s.lease_until > now || s.last_run != seen) {
             return Ok(None);
@@ -603,6 +687,14 @@ pub async fn fire(vault: &Vault, eval: &Evaluation, now: u64, force: bool) -> Re
     let Some(pending) = claim(vault, eval, task, now, force).await? else {
         return Ok(None);
     };
+    // A task not deployed here runs as it is now: store that version, so
+    // the receipt can link it.
+    if !eval.stored
+        && let Ok(Loaded { version: Some((v, facts)), .. }) = load(vault, &task.entity).await
+        && v.to_string() == eval.version
+    {
+        vault.write_unstamped(facts).await?;
+    }
     // The run writes as the task's own session, so its writes don't wake it.
     let context = task.entity.to_string();
     let agent = Vault::open_as(&vault.dir, &context).await?;
@@ -625,7 +717,9 @@ pub async fn fire(vault: &Vault, eval: &Evaluation, now: u64, force: bool) -> Re
     let error = (!errors.is_empty()).then(|| errors.join("; "));
     let mut fields = Map::new();
     fields.insert(RUN_TASK.into(), json!(task.entity.to_string()));
-    fields.insert("dreams.run/deploy".into(), json!(eval.hash));
+    if !eval.version.is_empty() {
+        fields.insert(RUN_VERSION.into(), json!(eval.version));
+    }
     fields.insert("dreams.run/peer".into(), json!(vault.session()));
     fields.insert("dreams.run/started".into(), json!(pending.started));
     fields.insert("dreams.run/finished".into(), json!(now_ms()));

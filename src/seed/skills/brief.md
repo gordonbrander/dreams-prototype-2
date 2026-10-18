@@ -1,7 +1,7 @@
 ---
-_type: doc://schemas/skill.json
-name: brief
-description: "Make a daily brief: food for thought that brings back ideas from the user's notes, with today's intention as its theme. Use when the user asks for a brief or a daily review."
+dreams.skill:
+  name: brief
+  description: "Make a daily brief: food for thought that brings back ideas from the user's notes, with today's intention as its theme. Use when the user asks for a brief or a daily review."
 ---
 # Daily brief
 
