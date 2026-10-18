@@ -1,32 +1,12 @@
 # Dreams
 
-A memory for you and your agents: notes stored as facts in a [DialogDB](https://github.com/dialog-db/dialog-db) database, with a command line, an MCP server, and background agents that "dream" over what you wrote.
+Give your agents a subconscious. Dreams is a memory store that lets agents learn while they sleep. Capture notes and agent memories. Background agents dream over them, uncovering new insights.
 
 You write Markdown. Your agents write Markdown too, or plain facts. Both are stored as `{the, of, is}` triples, so an agent can ask the vault questions in Datalog ("which notes link to a note that does not exist yet?") as well as search it. Scheduled agents wake on a timer, or when the answer to a query changes. The vault syncs between your devices through a folder, S3, or a UCAN service, and you can follow other people's published notes.
 
 It is one Rust binary. There is no server, and your data stays on your disk and in the remotes you choose.
 
-> **Status: experimental.** Dreams is built on DialogDB 0.4.0-rc.2, which changes most days and promises no migrations. The database format can change between builds of dreams. Keep an export (`dreams export`) of anything you care about.
-
-## Contents
-
-- [Build](#build)
-- [Quick start](#quick-start)
-- [How it works](#how-it-works)
-- [Notes](#notes)
-- [Your own kinds of things](#your-own-kinds-of-things)
-- [Asking questions: queries](#asking-questions-queries)
-- [Agents over MCP](#agents-over-mcp)
-- [Dreaming: scheduled tasks](#dreaming-scheduled-tasks)
-- [Feeds](#feeds)
-- [Sync between your devices](#sync-between-your-devices)
-- [Conflicts](#conflicts)
-- [Publishing and following](#publishing-and-following)
-- [Import and export](#import-and-export)
-- [Where things live](#where-things-live)
-- [FAQ](#faq)
-- [Command reference](#command-reference)
-- [Development](#development)
+> **Status: experimental.** Dreams is built on [DialogDB](https://github.com/dialog-db/dialog-db) 0.4.0-rc.2, which changes most days and promises no migrations. The database format can change between builds of dreams. Keep an export (`dreams export`) of anything you care about.
 
 ## Build
 
