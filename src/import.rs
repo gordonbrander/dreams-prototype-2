@@ -224,25 +224,17 @@ fn field(
                 put.fields.insert(the.into(), json!(v.to_string()));
             }
             Json::Object(fields) => {
-                // A nested object: a child entity derived from (parent, relation).
-                let child = Entity::of(&(of.to_string(), the));
-                let (domain, name) = the.split_once('/').unwrap_or((the, ""));
-                for (k, v) in fields {
-                    if let Some(scalar) = scalar(v) {
-                        let rel = format!("{domain}.{name}/{}", kebab(k));
-                        match vault::relation(&rel) {
-                            Ok(_) => children.push(vault::assert(&child, &rel, scalar, Pick::Last)?),
-                            Err(_) => skipped.push(format!("{rel}: not a valid relation")),
-                        }
-                    } else {
-                        // ponytail: one level of nesting; deeper values are reported, not imported.
-                        skipped.push(format!("{the}.{k}: nested too deep"));
-                    }
+                let c = child(of, the, None, fields, children, skipped)?;
+                children.push(vault::assert(of, the, Value::Entity(c), Pick::Last)?);
+            }
+            Json::Array(items) if items.iter().all(Json::is_object) => {
+                for (i, item) in items.iter().enumerate() {
+                    let c = child(of, the, Some(i), item.as_object().expect("an object"), children, skipped)?;
+                    children.push(vault::assert(of, the, Value::Entity(c), Pick::All)?);
                 }
-                put.fields.insert(the.into(), json!(child.to_string()));
             }
             Json::Array(items) if items.iter().any(|i| i.is_object() || i.is_array()) => {
-                skipped.push(format!("{the}: lists of objects are not imported yet"));
+                skipped.push(format!("{the}: lists that mix objects, lists and values are not imported"));
             }
             _ => {
                 put.fields.insert(the.into(), v.clone());
@@ -251,6 +243,123 @@ fn field(
     }
     Ok(())
 }
+
+/// A nested object as a child entity of `of` (SPEC §7.2), its id derived
+/// from (parent, relation) or, in a list, (parent, relation, index). Its
+/// keys go under the domain `<domain>.<name>`; a list item also records
+/// its `index`, so that export restores the order.
+fn child(
+    of: &Entity,
+    the: &str,
+    index: Option<usize>,
+    fields: &Map<String, Json>,
+    children: &mut Vec<dialog_artifacts::Instruction>,
+    skipped: &mut Vec<String>,
+) -> Result<Entity> {
+    let me = match index {
+        None => Entity::of(&(of.to_string(), the)),
+        Some(i) => Entity::of(&(of.to_string(), the, i as u64)),
+    };
+    let (domain, name) = the.split_once('/').unwrap_or((the, ""));
+    let sub = format!("{domain}.{name}");
+    if let Some(i) = index {
+        match vault::relation(&format!("{sub}/{INDEX}")) {
+            Ok(_) => children.push(vault::assert(&me, &format!("{sub}/{INDEX}"), Value::UnsignedInt((i as u64).into()), Pick::Last)?),
+            Err(_) => skipped.push(format!("{sub}/{INDEX}: not a valid relation")),
+        }
+    }
+    for (k, v) in fields {
+        let rel = format!("{sub}/{}", kebab(k));
+        if vault::relation(&rel).is_err() {
+            skipped.push(format!("{rel}: not a valid relation (64 bytes at most)"));
+            continue;
+        }
+        match v {
+            Json::Null => {}
+            Json::Object(f) => {
+                let c = child(&me, &rel, None, f, children, skipped)?;
+                children.push(vault::assert(&me, &rel, Value::Entity(c), Pick::Last)?);
+            }
+            Json::Array(items) if items.iter().all(Json::is_object) => {
+                for (i, item) in items.iter().enumerate() {
+                    let c = child(&me, &rel, Some(i), item.as_object().expect("an object"), children, skipped)?;
+                    children.push(vault::assert(&me, &rel, Value::Entity(c), Pick::All)?);
+                }
+            }
+            Json::Array(items) if items.iter().all(|i| scalar(i).is_some()) => {
+                for item in items {
+                    children.push(vault::assert(&me, &rel, scalar(item).expect("a scalar"), Pick::All)?);
+                }
+            }
+            v => match scalar(v) {
+                Some(value) => children.push(vault::assert(&me, &rel, value, Pick::Last)?),
+                None => skipped.push(format!("{rel}: lists that mix objects, lists and values are not imported")),
+            },
+        }
+    }
+    Ok(me)
+}
+
+/// Child entities (entities with facts but no path) back into nested
+/// objects, and lists of them back into their order: what import made of
+/// nested JSON (SPEC §7.4).
+async fn inline(vault: &Vault, v: Json, depth: usize) -> Result<Json> {
+    Ok(match v {
+        Json::String(s) if s.starts_with("did:") && depth < 8 => {
+            let Ok(e) = value::entity(&s) else { return Ok(Json::String(s)) };
+            let n = note::load(vault, &e).await?;
+            if n.facts.is_empty() || n.path().is_some() {
+                return Ok(Json::String(s));
+            }
+            let mut obj = Map::new();
+            for (the, values) in &n.facts {
+                let Some((domain, key)) = the.split_once('/') else { continue };
+                if domain == concepts::NOTE {
+                    continue;
+                }
+                let mut items = Vec::new();
+                for v in values {
+                    items.push(Box::pin(inline(vault, value::to_json(v), depth + 1)).await?);
+                }
+                let one = items.len() == 1 && !items[0].is_array();
+                obj.insert(key.to_string(), if one { items.remove(0) } else { order(items) });
+            }
+            // A list item stays a list, even of one; the list it lands in sorts it.
+            if obj.contains_key(INDEX) { Json::Array(vec![Json::Object(obj)]) } else { Json::Object(obj) }
+        }
+        Json::Array(items) => {
+            let mut out = Vec::new();
+            for v in items {
+                out.push(Box::pin(inline(vault, v, depth + 1)).await?);
+            }
+            order(out)
+        }
+        Json::Object(m) => {
+            let mut out = Map::new();
+            for (k, v) in m {
+                let v = Box::pin(inline(vault, v, depth + 1)).await?;
+                out.insert(k, if v.is_array() { order(as_list(&v)) } else { v });
+            }
+            Json::Object(out)
+        }
+        other => other,
+    })
+}
+
+/// Items in `index` order, without their `index`; nested one-item lists flattened.
+fn order(items: Vec<Json>) -> Json {
+    let mut flat: Vec<Json> = items.into_iter().flat_map(|i| if i.is_array() { as_list(&i) } else { vec![i] }).collect();
+    if flat.iter().all(|i| i.get(INDEX).is_some()) {
+        flat.sort_by_key(|i| i[INDEX].as_u64());
+        for i in &mut flat {
+            i.as_object_mut().expect("an object").remove(INDEX);
+        }
+    }
+    Json::Array(flat)
+}
+
+/// The attribute that orders the children made from a list of objects.
+const INDEX: &str = "index";
 
 fn scalar(v: &Json) -> Option<Value> {
     if v.is_object() || v.is_array() || v.is_null() { None } else { value::from_json(v, None).ok() }
@@ -304,10 +413,11 @@ pub async fn export(vault: &Vault, dir: &Path) -> Result<Vec<FileResult>> {
                 return Err(Error::invalid(format!("{path} cannot be a file path")));
             }
             let n = note::load(vault, &a.of).await?;
+            let Json::Object(fields) = inline(vault, Json::Object(n.to_json()), 0).await? else { unreachable!("an object") };
             let text = match Path::new(&path).extension().and_then(|e| e.to_str()) {
-                Some("json") => serde_json::to_string_pretty(&n.to_json())? + "\n",
-                Some("yaml" | "yml") => serde_yaml_ng::to_string(&n.to_json()).map_err(|e| Error::invalid(e.to_string()))?,
-                _ => n.markdown(),
+                Some("json") => serde_json::to_string_pretty(&fields)? + "\n",
+                Some("yaml" | "yml") => serde_yaml_ng::to_string(&fields).map_err(|e| Error::invalid(e.to_string()))?,
+                _ => markdown::render(&fields),
             };
             let file = dir.join(&path);
             if let Some(parent) = file.parent() {

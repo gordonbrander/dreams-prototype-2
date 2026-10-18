@@ -309,7 +309,7 @@ Dialog's `Importer` trait is only `Stream<Item = Result<Artifact, _>>`. The JSON
 | Array of scalars | One fact per element, and the attribute is declared `all:`. Order and duplicates are lost, which is right for tags and sets. |
 | Array that must keep its order | One `text:` value holding the array as JSON (§7.3), when the target concept marks the field ordered. |
 | Nested object | A child entity linked by `entity:`. Its keys go under the domain `<domain>.<kebab(k)>`. Its id is content-derived from `(parent entity, key)` (`EntityExt::of`), so re-imports and edits update the same child. |
-| Array of objects | Child entities with ids derived from `(parent, key, index)`, linked from the parent with `all:`. Each child carries `<domain>.<kebab(k)>/index` (`natural:`) so that export restores the order. |
+| Array of objects | Child entities with ids derived from `(parent, key, index)`, linked from the parent with `all:`. Each child carries `<domain>.<kebab(k)>/index` (`natural:`) so that export restores the order. Children nest to any depth, until a relation name passes 64 bytes; that key is reported. Arrays that mix objects, arrays and values are reported and skipped. |
 
 The spike's task `when: {tag: "inbox"}` would become a child entity with `dreams.task.when/tag = "inbox"`. On migration, the importer instead rewrites the spike's `when` filters into a `when` query (§10.2), because that is how this design expresses them.
 
@@ -321,7 +321,7 @@ Dialog has a native answer to ordering: position names, a fractional index in th
 
 ### 7.4 Round-trip
 
-`dreams export <dir>` writes each note back to `<path>`, using the format its extension implies, which is the spike's behavior. Unmapped domains come back as nested keys.
+`dreams export <dir>` writes each note back to `<path>`, using the format its extension implies, which is the spike's behavior. Unmapped domains come back as nested keys, and child entities come back as the nested objects and ordered lists they were imported from, so a re-import derives the same ids.
 
 The original JSON bytes are not kept, so import followed by export is faithful to the facts, not to the bytes. That is deliberate: keeping a `record:` copy would be a second source of truth, and `record:` is not yet supported end to end in Dialog.
 
@@ -598,7 +598,12 @@ laptop-2$ dreams remote add origin /Volumes/nas/dreams   # picks the delegation 
 - **Pull merges.** Concurrent edits become conflicts (§6), not errors.
 - **Automatic sync.** The daemon syncs after every tick when a remote is configured.
 - **Remote records.** Which remotes each space has lives in the local repository (`dreams.remote/*`), per device.
-- **Remote types.** Folder remotes only for now: a NAS or a Syncthing'd directory is the "gloves" default. S3/R2 and UCAN access services come after (`dialog-remote-s3`, `dialog-remote-ucan`).
+- **Remote types.** A location is one of:
+  - a folder (a NAS or a Syncthing'd directory: the "gloves" default);
+  - `s3://<bucket>?endpoint=<url>&region=<r>&path-style=true`, S3 or R2, with `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` saved into the peer's sealed site secrets;
+  - `ucan+https://<access service>`, where the delegation chain is the only credential.
+
+  A bucket or a service has no place for the `dreams-remote` file or delegation files, so the joining device passes `--repository <did>` and `--delegation <file>` (the file `device add` writes beside the vault).
 - **Folder sync is safe.** The spike warned against putting a live vault in Dropbox or iCloud. A Dialog *remote* is designed for "dumb" shared storage, because it uses blocks plus compare-and-swap. The live `dialog/` folder still must not be in Dropbox.
 - **Stack.** Dialog's sync futures are deep in debug builds; the CLI runs commands on a 64 MiB thread.
 
@@ -629,16 +634,16 @@ dreams peer add alice /shared/alice-public
 | `dreams:///notes/x.md` | This vault, path `notes/x.md` |
 | `dreams://alice/notes/x.md` | Petname `alice`, its replica, then the note whose `dreams.note/path` is `notes/x.md` |
 
-`get_note` and `note get` take either. `query` and `describe` take an optional `vault` (a petname). A `[[dreams://alice/…]]` link in content becomes a `dreams.note/xlink` fact, not a dangling link.
+`get_note` and `note get` take either. `query`, `describe` and `search` take an optional `vault` (a petname). A `[[dreams://alice/…]]` link in content becomes a `dreams.note/xlink` fact, not a dangling link.
 
 Queries do **not** join across vaults. Each query runs against one repository. An agent that wants to relate Alice's notes to mine queries both and writes notes that link with `dreams://` URIs.
 
 ### 12.4 Gaps to state plainly
 
 - **No encryption on remotes.** Dialog stores nodes unencrypted on remotes for now, and encryption is planned upstream. Until it lands, a remote must be storage the person trusts. `dreams remote add` says so.
-- **Revocation is incomplete upstream.** A delegation handed out can't yet be reliably revoked. Until revocation lands, moving to a new remote folder is the way to cut access.
+- **Revocation is only as strong as the remote.** `device revoke <did>` and `peer revoke <did>` sign a revocation of the delegation this device issued and post it to each UCAN access service's `/revocations`, which refuses that delegation from then on. A folder or a bucket checks no delegations: anyone who can read it keeps reading. There, revoking removes the delegation file and says to move to a new remote.
 - **Grants are whole-repository.** `peer grant` delegates the whole `public` repository, writes included; it narrows to reads once Dialog's read-only claims settle.
-- **Search covers this vault only.** Followed vaults are read with `get_note`, `query` and `describe`.
+- **Search of a followed vault** uses its own index (`index-peer-<name>`), caught up from the replica on read: `search` with `vault`, `note search --peer`.
 
 ---
 

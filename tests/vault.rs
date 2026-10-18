@@ -339,3 +339,47 @@ async fn seeding_is_idempotent_protected_and_convergent() {
         {"assert": {"with": {"is": {"the": "dreams.daily/date", "as": "text:"}}}, "where": {"this": {"?": {"name": "n"}}, "is": {"?": {"name": "date"}}}}]}), "date").await;
     assert_eq!(daily, ["2026-10-18.md"]);
 }
+
+#[tokio::test]
+async fn nested_objects_and_lists_of_objects_import_as_children_and_export_back() {
+    use dreams::import::{Options, export, import, read_dir};
+    let s = Sandbox::new();
+    let v = Vault::open(&s.0).await.unwrap();
+    let doc = json!({
+        "_type": "doc://schemas/recipe.json",
+        "title": "Pad thai",
+        "source": {"book": "Thai Food", "page": 12, "author": {"name": "David"}},
+        "steps": [{"text": "soak noodles", "minutes": 30}, {"text": "fry"}],
+        "single": [{"text": "only one"}]
+    });
+    let docs = vec![("recipes/pad-thai.json".to_string(), doc.to_string())];
+    let report = import(&v, &docs, &Options::default()).await.unwrap();
+    assert!(report[0].skipped.is_empty() && report[0].error.is_none(), "{report:?}");
+
+    // The steps are entities in order, queryable by their own attributes.
+    let rows = query(&v, &json!({"deduce": {"find": ["step", "text", "i"]}, "when": [
+        {"assert": {"with": {"is": {"the": "me.recipe/steps", "as": "entity:", "pick": "all:"}}}, "where": {"this": {"?": {"name": "r"}}, "is": {"?": {"name": "step"}}}},
+        {"assert": {"with": {"is": {"the": "me.recipe.steps/text", "as": "text:"}}}, "where": {"this": {"?": {"name": "step"}}, "is": {"?": {"name": "text"}}}},
+        {"assert": {"with": {"is": {"the": "me.recipe.steps/index", "as": "natural:"}}}, "where": {"this": {"?": {"name": "step"}}, "is": {"?": {"name": "i"}}}}]}), 100).await.unwrap();
+    let mut steps: Vec<(u64, String)> = rows.iter().map(|r| (r["i"].as_u64().unwrap(), r["text"].as_str().unwrap().into())).collect();
+    steps.sort();
+    assert_eq!(steps, [(0, "soak noodles".into()), (1, "fry".into())]);
+
+    // Export inlines the children; importing that into a new vault gives the same facts and ids.
+    let out = s.0.join("out");
+    export(&v, &out).await.unwrap();
+    let exported: Json = serde_json::from_str(&std::fs::read_to_string(out.join("recipes/pad-thai.json")).unwrap()).unwrap();
+    assert_eq!(exported["me.recipe"]["steps"], json!([{"text": "soak noodles", "minutes": 30}, {"text": "fry"}]));
+    assert_eq!(exported["me.recipe"]["single"], json!([{"text": "only one"}]));
+    assert_eq!(exported["me.recipe"]["source"]["author"], json!({"name": "David"}));
+
+    let s2 = Sandbox::new();
+    let v2 = Vault::open(&s2.0).await.unwrap();
+    let files: Vec<_> = read_dir(&out).unwrap().into_iter().filter(|(p, _)| p.starts_with("recipes/")).collect();
+    let report = import(&v2, &files, &Options::default()).await.unwrap();
+    assert!(report[0].skipped.is_empty(), "{report:?}");
+    let out2 = s2.0.join("out");
+    export(&v2, &out2).await.unwrap();
+    let again: Json = serde_json::from_str(&std::fs::read_to_string(out2.join("recipes/pad-thai.json")).unwrap()).unwrap();
+    assert_eq!(again["me.recipe"], exported["me.recipe"]);
+}

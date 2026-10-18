@@ -34,10 +34,19 @@ pub type Selector = ArtifactSelector<Constrained>;
 pub const UPDATED: &str = "dreams.note/updated";
 pub const BY: &str = "dreams.note/by";
 
+/// Where a remote lives.
+#[derive(Debug, Clone)]
+pub enum Site {
+    Folder(PathBuf),
+    S3 { address: dialog_remote_s3::Address, credential: dialog_remote_s3::S3Credential },
+    /// A UCAN access service: the delegation chain is the credential.
+    Ucan(String),
+}
+
 /// The file in a remote folder that names the repository it holds.
 pub const REMOTE_MARKER: &str = "dreams-remote";
 
-fn delegation_file(folder: &Path, device: &str) -> PathBuf {
+pub fn delegation_file(folder: &Path, device: &str) -> PathBuf {
     folder.join("delegations").join(format!("{}.ucan", device.replace(':', "_")))
 }
 
@@ -53,6 +62,8 @@ pub struct Vault {
     /// The space this handle reads and writes: `vault`, `public`, or a followed `peer-<name>`.
     pub space: String,
     peer: Peer<NativeSpace>,
+    /// The device's key: it signs revocations of what it delegated.
+    key: SignerCredential,
     env: Env,
     repo: Arc<Repository>,
     vault: Branch,
@@ -97,7 +108,7 @@ impl Vault {
         let vault = repo.branch("main").open().perform(&env).await.map_err(Error::dialog)?;
         let local = peer.space("local").open().perform(&env).await.map_err(Error::dialog)?;
         let local = local.branch("main").open().perform(&env).await.map_err(Error::dialog)?;
-        Ok(Vault { dir: dir.to_path_buf(), space: "vault".into(), peer, env, repo: Arc::new(repo), vault, local })
+        Ok(Vault { dir: dir.to_path_buf(), space: "vault".into(), peer, key: me, env, repo: Arc::new(repo), vault, local })
     }
 
     /// A handle on another space of this device, sharing this one's session
@@ -110,6 +121,7 @@ impl Vault {
             dir: self.dir.clone(),
             space: space.into(),
             peer: self.peer.clone(),
+            key: self.key.clone(),
             env: self.env.clone(),
             repo: Arc::new(repo),
             vault,
@@ -136,39 +148,53 @@ impl Vault {
         chain.0.to_bytes().map_err(Error::dialog)
     }
 
-    /// Track `folder` as the remote `name`: the vault's `main` pulls from and
-    /// pushes to the `main` of the repository the folder holds. An empty
-    /// folder becomes the space of this vault's repository; a folder another
-    /// device set up needs that device's delegation (`device add`) first.
-    pub async fn add_remote(&self, name: &str, folder: &Path) -> Result<String> {
-        std::fs::create_dir_all(folder)?;
-        // A delegation another device left here for this one.
-        if let Ok(chain) = std::fs::read(delegation_file(folder, &self.device())) {
-            self.accept(&chain).await?;
-        }
-        let marker = folder.join(REMOTE_MARKER);
-        let target = match std::fs::read_to_string(&marker) {
-            Ok(did) => did.trim().to_string(),
-            Err(_) => {
-                // The folder's identity is the repository's public key only.
-                let fs = FileSystem::open(&location(folder)).await.map_err(Error::dialog)?;
-                let verifier = match self.repo.credential() {
-                    Credential::Signer(s) => Credential::Verifier(VerifierCredential::from(s.0.verifier())),
-                    v => v.clone(),
+    /// Track `site` as the remote `name`: this space's `main` pulls from and
+    /// pushes to the `main` of the repository the site holds.
+    ///
+    /// - A folder names its repository in its `dreams-remote` file. An
+    ///   empty folder becomes the space of this repository; a folder another
+    ///   device set up needs that device's delegation (`device add`), which
+    ///   it leaves in the folder.
+    /// - An S3 bucket holds this repository unless `repository` names
+    ///   another device's; its delegation then comes as a file (`accept`).
+    pub async fn add_remote(&self, name: &str, site: &Site, repository: Option<&str>) -> Result<String> {
+        let (address, target) = match site {
+            Site::Folder(folder) => {
+                std::fs::create_dir_all(folder)?;
+                // A delegation another device left here for this one.
+                if let Ok(chain) = std::fs::read(delegation_file(folder, &self.device())) {
+                    self.accept(&chain).await?;
+                }
+                let marker = folder.join(REMOTE_MARKER);
+                let target = match std::fs::read_to_string(&marker) {
+                    Ok(did) => did.trim().to_string(),
+                    Err(_) => {
+                        // The folder's identity is the repository's public key only.
+                        let fs = FileSystem::open(&location(folder)).await.map_err(Error::dialog)?;
+                        let verifier = match self.repo.credential() {
+                            Credential::Signer(s) => Credential::Verifier(VerifierCredential::from(s.0.verifier())),
+                            v => v.clone(),
+                        };
+                        self.repo.did().credential().key("self").save(verifier).perform(&fs).await.map_err(Error::dialog)?;
+                        std::fs::write(&marker, self.repository())?;
+                        self.repository()
+                    }
                 };
-                self.repo.did().credential().key("self").save(verifier).perform(&fs).await.map_err(Error::dialog)?;
-                std::fs::write(&marker, self.repository())?;
-                self.repository()
+                (SiteAddress::Fs(FsAddress::new(location(folder))), target)
             }
+            Site::S3 { address, credential } => {
+                let address = SiteAddress::S3(address.clone());
+                self.peer.secrets().site(&address).save(credential.clone()).perform(&self.peer).await.map_err(Error::dialog)?;
+                (address, repository.map_or_else(|| self.repository(), str::to_string))
+            }
+            Site::Ucan(endpoint) => (
+                SiteAddress::Ucan(dialog_remote_ucan::UcanAddress::new(endpoint.clone())),
+                repository.map_or_else(|| self.repository(), str::to_string),
+            ),
         };
-        let did: dialog_varsig::Did = target.parse().map_err(|e| Error::invalid(format!("{marker:?}: {e}")))?;
+        let did: dialog_varsig::Did = target.parse().map_err(|e| Error::invalid(format!("not a repository DID: {target} ({e})")))?;
         let name = format!("{}-{name}", self.space);
-        contact(&did)
-            .add_address(SiteAddress::Fs(FsAddress::new(location(folder))))
-            .name(name.as_str())
-            .perform(&self.env)
-            .await
-            .map_err(Error::dialog)?;
+        contact(&did).add_address(address).name(name.as_str()).perform(&self.env).await.map_err(Error::dialog)?;
         let remote = contact(name.as_str()).connect().repository(did).open().perform(&self.env).await.map_err(Error::dialog)?;
         let upstream = remote.branch("main").open().perform(&self.env).await.map_err(Error::dialog)?;
         self.vault.set_upstream(upstream).perform(&self.env).await.map_err(Error::dialog)?;
@@ -194,6 +220,26 @@ impl Vault {
         std::fs::create_dir_all(file.parent().expect("a folder"))?;
         std::fs::write(&file, self.delegate(device).await?)?;
         Ok(file)
+    }
+
+    /// A signed revocation of the delegation in `chain` that this device
+    /// issued: what an access service is posted to refuse it from then on.
+    pub async fn revocation(&self, chain: &[u8]) -> Result<Vec<u8>> {
+        let chain = dialog_ucan_core::DelegationChain::try_from(chain).map_err(Error::dialog)?;
+        let mine = self.peer.did();
+        let issued = chain
+            .proofs()
+            .find(|d| *d.issuer() == mine)
+            .ok_or_else(|| Error::invalid("this device issued no delegation in that chain"))?;
+        let cid = issued.to_cid();
+        let revoker = dialog_credentials::Signer::from(self.key.clone());
+        let revocation = dialog_ucan_core::revocation::builder::RevocationBuilder::new(revoker, cid)
+            .try_build()
+            .await
+            .map_err(Error::dialog)?;
+        let delegations = std::collections::HashMap::from([(cid, Arc::new(issued.clone()))]);
+        let document = dialog_ucan_core::RevocationChain::assemble(revocation, delegations).map_err(Error::dialog)?;
+        document.to_bytes().map_err(Error::dialog)
     }
 
     /// Keep a delegation another device made for this one.

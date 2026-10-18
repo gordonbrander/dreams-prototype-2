@@ -220,14 +220,22 @@ enum FeedCmd {
 
 #[derive(Subcommand)]
 enum RemoteCmd {
-    /// Sync with FOLDER. An empty folder becomes this vault's remote; a
-    /// folder another device set up needs its `dreams device add` first.
+    /// Sync with LOCATION: a folder, ucan+https://<access service>, or s3://<bucket>?endpoint=<url>&region=<r>
+    /// (credentials from AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY). An empty
+    /// folder becomes this vault's remote; a folder another device set up
+    /// needs its `dreams device add` first.
     Add {
         name: String,
-        folder: PathBuf,
+        location: String,
         /// A remote of the public repository instead.
         #[arg(long)]
         public: bool,
+        /// For an S3 remote another device set up: its repository DID.
+        #[arg(long)]
+        repository: Option<String>,
+        /// A delegation file from that device's `dreams device add`.
+        #[arg(long)]
+        delegation: Option<PathBuf>,
     },
     List,
     Rm {
@@ -243,16 +251,28 @@ enum DeviceCmd {
     Id,
     /// Let the device DID sync this vault: leaves a delegation in each remote folder.
     Add { did: String },
+    /// Stop the device DID syncing: enforced by UCAN access services only.
+    Revoke { did: String },
 }
 
 #[derive(Subcommand)]
 enum PeerCmd {
-    /// Follow the vault published in FOLDER as NAME. Its notes are dreams://NAME/<path>.
-    Add { name: String, folder: PathBuf },
+    /// Follow the vault published at LOCATION (a folder, or s3:// with
+    /// --repository and --delegation) as NAME. Its notes are dreams://NAME/<path>.
+    Add {
+        name: String,
+        location: String,
+        #[arg(long)]
+        repository: Option<String>,
+        #[arg(long)]
+        delegation: Option<PathBuf>,
+    },
     List,
     Rm { name: String },
     /// Let the device DID follow what you publish.
     Grant { did: String },
+    /// Stop the device DID following what you publish: enforced by UCAN access services only.
+    Revoke { did: String },
 }
 
 #[derive(Subcommand)]
@@ -286,6 +306,9 @@ enum NoteCmd {
     /// Full-text search.
     Search {
         q: String,
+        /// Search a followed vault, by petname.
+        #[arg(long)]
+        peer: Option<String>,
         #[arg(long)]
         tag: Option<String>,
         #[arg(long)]
@@ -582,8 +605,11 @@ async fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: C
             let v = open(&dir, &cli.session).await?;
             let space = |public: bool| if public { peer::PUBLIC } else { "vault" };
             match cmd {
-                RemoteCmd::Add { name, folder, public } => {
-                    print_json(out, &peer::add_remote(&v, space(public), &name, &folder).await?)?
+                RemoteCmd::Add { name, location, public, repository, delegation } => {
+                    if let Some(file) = delegation {
+                        v.accept(&std::fs::read(file)?).await?;
+                    }
+                    print_json(out, &peer::add_remote(&v, space(public), &name, &location, repository.as_deref()).await?)?
                 }
                 RemoteCmd::List => print_json(out, &peer::remotes(&v).await?)?,
                 RemoteCmd::Rm { name, public } => peer::rm_remote(&v, space(public), &name).await?,
@@ -600,19 +626,27 @@ async fn execute(cli: Cli, stdin: &mut dyn Read, out: &mut dyn Write, confirm: C
                         writeln!(out, "wrote {}", f.display())?;
                     }
                     writeln!(out, "On that device: dreams remote add <name> <folder>")?;
+                    writeln!(out, "For an S3 remote, copy the file there and add --repository {} --delegation <file>", v.repository())?;
                 }
+                DeviceCmd::Revoke { did } => print_json(out, &peer::revoke(&v, "vault", &did).await?)?,
             }
         }
         Command::Peer(cmd) => {
             let v = open(&dir, &cli.session).await?;
             match cmd {
-                PeerCmd::Add { name, folder } => print_json(out, &peer::follow(&v, &name, &folder).await?)?,
+                PeerCmd::Add { name, location, repository, delegation } => {
+                    if let Some(file) = delegation {
+                        v.accept(&std::fs::read(file)?).await?;
+                    }
+                    print_json(out, &peer::follow(&v, &name, &location, repository.as_deref()).await?)?
+                }
                 PeerCmd::List => {
                     let peers: Vec<_> =
                         peer::remotes(&v).await?.into_iter().filter(|r| r.space.starts_with("peer-")).collect();
                     print_json(out, &peers)?;
                 }
                 PeerCmd::Rm { name } => peer::rm_remote(&v, &format!("peer-{name}"), &name).await?,
+                PeerCmd::Revoke { did } => print_json(out, &peer::revoke(&v, peer::PUBLIC, &did).await?)?,
                 PeerCmd::Grant { did } => {
                     for f in peer::peer_grant(&v, &did).await? {
                         writeln!(out, "wrote {}", f.display())?;
@@ -777,7 +811,11 @@ async fn note_cmd(
             writeln!(out, "deleted {href}")?;
         }
         NoteCmd::List { tag, prefix, limit } => search(v, dir, out, json, "", tag, prefix, limit).await?,
-        NoteCmd::Search { q, tag, prefix, limit } => search(v, dir, out, json, &q, tag, prefix, limit).await?,
+        NoteCmd::Search { q, peer: None, tag, prefix, limit } => search(v, dir, out, json, &q, tag, prefix, limit).await?,
+        NoteCmd::Search { q, peer: Some(name), tag, prefix, limit } => {
+            let followed = crate::peer::followed(v, &name).await?;
+            search(&followed, dir, out, json, &q, tag, prefix, limit).await?
+        }
         NoteCmd::History { note: href, attribute } => {
             let e = note::resolve(v, &href).await?;
             let rows: Vec<Json> = v
@@ -833,7 +871,7 @@ async fn search(
     prefix: Option<String>,
     limit: usize,
 ) -> anyhow::Result<()> {
-    let s = Search::open(dir)?;
+    let s = Search::open_space(dir, &v.space)?;
     s.catch_up(v).await?;
     let hits = s.search(q, tag.as_deref(), prefix.as_deref(), limit)?;
     if json {

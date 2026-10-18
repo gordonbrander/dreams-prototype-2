@@ -12,6 +12,8 @@ dialog-capability = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.
 dialog-credentials = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-effects = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-peer = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-remote-ucan = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-remote-s3 = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-remote-fs = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-query = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
 dialog-repository = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
@@ -29,7 +31,7 @@ schemars = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml_ng = "0.10"
-sha2 = "0.11"
+sha2 = "0.11.0-rc.5"
 slug = "0.1"
 tantivy = "0.27"
 thiserror = "2"
@@ -38,3 +40,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ureq = "3.4"
 uuid = { version = "1", features = ["v7"] }
+
+[dev-dependencies]
+dialog-remote-ucan = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2" }
+dialog-remote-s3 = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2", features = ["helpers"] }
+dialog-remote-ucan-s3 = { git = "https://github.com/dialog-db/dialog-db", tag = "v0.4.0-rc.2", features = ["helpers"] }

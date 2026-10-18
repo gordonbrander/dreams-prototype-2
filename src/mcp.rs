@@ -102,6 +102,8 @@ pub struct SearchParams {
     pub prefix: Option<String>,
     /// Default 20, max 200.
     pub limit: Option<usize>,
+    /// A followed vault's petname. Default: this vault.
+    pub vault: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -247,14 +249,23 @@ impl Server {
 
     #[tool(description = "Full-text search over notes' title (weighted most), tags and content, best match first. \
         Each hit has the entity, path, title, tags, updated, and a snippet with matches in **. Filter by `tag` and by \
-        `prefix` of the path. Omit `q` to list notes, newest first.")]
+        `prefix` of the path. Omit `q` to list notes, newest first. `vault` searches a followed vault by petname.")]
     async fn search(&self, Parameters(p): Parameters<SearchParams>) -> Result<CallToolResult, McpError> {
-        self.search.catch_up(&self.vault).await.map_err(to_mcp)?;
         let limit = p.limit.unwrap_or(20).min(200);
-        let hits = self
-            .search
-            .search(p.q.as_deref().unwrap_or(""), p.tag.as_deref(), p.prefix.as_deref(), limit)
-            .map_err(to_mcp)?;
+        let q = p.q.as_deref().unwrap_or("");
+        let hits = match p.vault.as_deref() {
+            None => {
+                self.search.catch_up(&self.vault).await.map_err(to_mcp)?;
+                self.search.search(q, p.tag.as_deref(), p.prefix.as_deref(), limit)
+            }
+            Some(name) => {
+                let vault = self.on(Some(name)).await?;
+                let index = Search::open_space(&vault.dir, &vault.space).map_err(to_mcp)?;
+                index.catch_up(&vault).await.map_err(to_mcp)?;
+                index.search(q, p.tag.as_deref(), p.prefix.as_deref(), limit)
+            }
+        }
+        .map_err(to_mcp)?;
         ok(json!({ "hits": hits }))
     }
 

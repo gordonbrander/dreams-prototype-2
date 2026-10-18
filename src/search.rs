@@ -72,7 +72,13 @@ fn schema() -> (Schema, Fields) {
 impl Search {
     /// Open the index in `<vault>/index`, creating it on first use.
     pub fn open(dir: &Path) -> Result<Self> {
-        let path = dir.join("index");
+        Self::open_space(dir, "vault")
+    }
+
+    /// The index of one space: `index` for the vault, `index-<space>` for
+    /// another, such as a followed `peer-<name>`.
+    pub fn open_space(dir: &Path, space: &str) -> Result<Self> {
+        let path = if space == "vault" { dir.join("index") } else { dir.join(format!("index-{space}")) };
         std::fs::create_dir_all(&path)?;
         let (schema, f) = schema();
         let directory = tantivy::directory::MmapDirectory::open(&path).map_err(search_error)?;

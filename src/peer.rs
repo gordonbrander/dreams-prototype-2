@@ -1,4 +1,5 @@
 //! Multiplayer (SPEC §12): remotes, devices, publishing and followed vaults.
+//! A remote is a folder, an S3 bucket, or a UCAN access service.
 //!
 //! - A **remote** is a folder that holds one repository. The vault syncs
 //!   with it: pull, then push. `public` can have remotes too.
@@ -11,7 +12,7 @@
 //!
 //! Which remotes each space has is recorded in the local repository.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use dialog_artifacts::{ArtifactSelector, Entity, Instruction, Pick, Value};
 use dialog_repository::schema::EntityExt as _;
@@ -21,11 +22,11 @@ use serde::Serialize;
 use crate::error::{Error, Result};
 use crate::note::{self, Note};
 use crate::value;
-use crate::vault::{self, Vault, assert};
+use crate::vault::{self, Site, Vault, assert};
 
 const SPACE: &str = "dreams.remote/space";
 const NAME: &str = "dreams.remote/name";
-const FOLDER: &str = "dreams.remote/folder";
+const LOCATION: &str = "dreams.remote/location";
 const REPOSITORY: &str = "dreams.remote/repository";
 /// The space of the repository this device publishes.
 pub const PUBLIC: &str = "public";
@@ -37,7 +38,8 @@ pub struct Remote {
     /// `vault`, `public`, or `peer-<petname>`.
     pub space: String,
     pub name: String,
-    pub folder: String,
+    /// A folder, or `s3://<bucket>?endpoint=<url>&region=<region>`.
+    pub location: String,
     /// The DID of the repository the folder holds.
     pub repository: String,
 }
@@ -54,24 +56,50 @@ pub async fn remotes(vault: &Vault) -> Result<Vec<Remote>> {
         let get = |the: &str| {
             facts.iter().find(|f| f.the.to_string() == the).and_then(|f| value::text(&f.is)).unwrap_or_default().to_string()
         };
-        out.push(Remote { space: get(SPACE), name: get(NAME), folder: get(FOLDER), repository: get(REPOSITORY) });
+        out.push(Remote { space: get(SPACE), name: get(NAME), location: get(LOCATION), repository: get(REPOSITORY) });
     }
     out.sort_by(|a, b| (&a.space, &a.name).cmp(&(&b.space, &b.name)));
     Ok(out)
 }
 
-/// Make `folder` a remote of `space`.
-pub async fn add_remote(vault: &Vault, space: &str, name: &str, folder: &Path) -> Result<Remote> {
-    let folder = std::path::absolute(folder)?;
-    let repository = vault.view(space).await?.add_remote(name, &folder).await?;
-    let remote = Remote { space: space.into(), name: name.into(), folder: folder.to_string_lossy().into(), repository };
+/// Where a remote lives: a folder path, `ucan+https://<access service>`, or `s3://<bucket>?endpoint=<url>&region=<region>&path-style=true`
+/// with credentials from `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+pub fn site(location: &str) -> Result<(Site, String)> {
+    if let Some(endpoint) = location.strip_prefix("ucan+") {
+        return Ok((Site::Ucan(endpoint.to_string()), location.to_string()));
+    }
+    let Some(rest) = location.strip_prefix("s3://") else {
+        let folder = std::path::absolute(location)?;
+        return Ok((Site::Folder(folder.clone()), folder.to_string_lossy().into()));
+    };
+    let (bucket, query) = rest.split_once('?').unwrap_or((rest, ""));
+    let param = |k: &str| query.split('&').find_map(|kv| kv.strip_prefix(&format!("{k}=")).map(str::to_string));
+    let region = param("region").unwrap_or_else(|| "us-east-1".into());
+    let endpoint = param("endpoint").unwrap_or_else(|| format!("https://s3.{region}.amazonaws.com"));
+    let address = dialog_remote_s3::Address::builder(&endpoint)
+        .region(&region)
+        .bucket(bucket.trim_end_matches('/'))
+        .path_style(param("path-style").as_deref() == Some("true"))
+        .build()
+        .map_err(|e| Error::invalid(format!("{location}: {e}")))?;
+    let env = |k: &str| std::env::var(k).map_err(|_| Error::invalid(format!("an S3 remote needs {k} in the environment")));
+    let credential = dialog_remote_s3::S3Credential::new(env("AWS_ACCESS_KEY_ID")?, env("AWS_SECRET_ACCESS_KEY")?);
+    Ok((Site::S3 { address, credential }, location.to_string()))
+}
+
+/// Make `location` a remote of `space`. `repository` names another
+/// device's repository in an S3 bucket; a folder names its own.
+pub async fn add_remote(vault: &Vault, space: &str, name: &str, location: &str, repository: Option<&str>) -> Result<Remote> {
+    let (site, location) = site(location)?;
+    let repository = vault.view(space).await?.add_remote(name, &site, repository).await?;
+    let remote = Remote { space: space.into(), name: name.into(), location, repository };
     let of = record(space, name);
     let text = |s: &str| Value::String(s.into());
     vault
         .write_local(vec![
             assert(&of, SPACE, text(&remote.space), Pick::Last)?,
             assert(&of, NAME, text(&remote.name), Pick::Last)?,
-            assert(&of, FOLDER, text(&remote.folder), Pick::Last)?,
+            assert(&of, LOCATION, text(&remote.location), Pick::Last)?,
             assert(&of, REPOSITORY, text(&remote.repository), Pick::Last)?,
         ])
         .await?;
@@ -153,10 +181,54 @@ async fn grant(vault: &Vault, space: &str, device: &str) -> Result<Vec<PathBuf>>
     let view = vault.view(space).await?;
     let mut out = Vec::new();
     for r in remotes(vault).await?.into_iter().filter(|r| r.space == space) {
-        out.push(view.grant(device, Path::new(&r.folder)).await?);
+        // A bucket has no place for it: the file goes beside the vault, to hand over.
+        let in_folder = !r.location.starts_with("s3://") && !r.location.starts_with("ucan+");
+        let folder = if in_folder { PathBuf::from(&r.location) } else { vault.dir.clone() };
+        if !out.iter().any(|f: &PathBuf| f.starts_with(&folder)) {
+            out.push(view.grant(device, &folder).await?);
+        }
     }
     if out.is_empty() {
         return Err(Error::invalid(format!("the {space} space has no remote; add one first")));
+    }
+    Ok(out)
+}
+
+/// What revoking a device did at one remote.
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct Revoked {
+    pub location: String,
+    /// `revoked` (the access service refuses the delegation from now on),
+    /// or why it could not be enforced there.
+    pub outcome: String,
+}
+
+/// Stop `device` syncing this vault, or (`space` = `public`) following it.
+/// A UCAN access service is posted a signed revocation and refuses the
+/// delegation from then on. A folder or a bucket has nothing that checks
+/// delegations: anyone who can read it keeps reading, so the delegation
+/// file is removed and the outcome says to move to a new remote.
+pub async fn revoke(vault: &Vault, space: &str, device: &str) -> Result<Vec<Revoked>> {
+    let mut out = Vec::new();
+    for r in remotes(vault).await?.into_iter().filter(|r| r.space == space) {
+        let outcome = if let Some(endpoint) = r.location.strip_prefix("ucan+") {
+            let file = vault::delegation_file(&vault.dir, device);
+            let chain = std::fs::read(&file).map_err(|_| Error::invalid(format!("no delegation to {device} at {}", file.display())))?;
+            let document = vault.view(space).await?.revocation(&chain).await?;
+            let url = format!("{}/revocations", endpoint.trim_end_matches('/'));
+            let posted = tokio::task::spawn_blocking(move || ureq::post(&url).send(&document[..]).map(|_| ()))
+                .await
+                .map_err(|e| Error::invalid(e.to_string()))?;
+            match posted {
+                Ok(()) => "revoked".to_string(),
+                Err(e) => format!("the service refused the revocation: {e}"),
+            }
+        } else {
+            let folder = if r.location.starts_with("s3://") { vault.dir.clone() } else { PathBuf::from(&r.location) };
+            let _ = std::fs::remove_file(vault::delegation_file(&folder, device));
+            "not enforceable here: anyone who can read this remote can still sync; move to a new remote to cut access".into()
+        };
+        out.push(Revoked { location: r.location, outcome });
     }
     Ok(out)
 }
@@ -169,9 +241,9 @@ fn petname_space(name: &str) -> Result<String> {
 }
 
 /// Follow the vault published in `folder`, under the petname `name`.
-pub async fn follow(vault: &Vault, name: &str, folder: &Path) -> Result<Remote> {
+pub async fn follow(vault: &Vault, name: &str, location: &str, repository: Option<&str>) -> Result<Remote> {
     let space = petname_space(name)?;
-    let remote = add_remote(vault, &space, name, folder).await?;
+    let remote = add_remote(vault, &space, name, location, repository).await?;
     vault.view(&space).await?.pull().await?;
     Ok(remote)
 }
