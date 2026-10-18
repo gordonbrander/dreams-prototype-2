@@ -324,4 +324,18 @@ async fn seeding_is_idempotent_protected_and_convergent() {
     let v2 = Vault::open(&s2.0).await.unwrap();
     seed(&v2).await.unwrap();
     assert_eq!(note::get(&v2, "runners/claude.json").await.unwrap().entity, runner.entity, "seeded ids converge");
+
+    // The seeded rules are installed once, and read like stored facts.
+    let rules = dreams::describe::describe(&v, Some("dialog.rule")).await.unwrap()["rules"].as_array().unwrap().len();
+    assert_eq!(rules, dreams::seed::rules().len());
+    write(&v, "2026-10-18.md", "see [[notes/target.md]]", &[]).await;
+    write(&v, "notes/target.md", "", &[]).await;
+    let backlinks = paths(&v, json!({"deduce": {"find": ["source", "path"]}, "when": [
+        {"assert": {"with": {"is": {"the": "dreams.note/path", "as": "text:"}}}, "where": {"this": {"?": {"name": "t"}}, "is": "notes/target.md"}},
+        {"assert": {"with": {"is": {"the": "dreams.note/backlink", "as": "entity:", "pick": "all:"}}}, "where": {"this": {"?": {"name": "t"}}, "is": {"?": {"name": "source"}}}},
+        {"assert": {"with": {"is": {"the": "dreams.note/path", "as": "text:"}}}, "where": {"this": {"?": {"name": "source"}}, "is": {"?": {"name": "path"}}}}]}), "path").await;
+    assert_eq!(backlinks, ["2026-10-18.md"]);
+    let daily = paths(&v, json!({"deduce": {"find": ["n", "date"]}, "when": [
+        {"assert": {"with": {"is": {"the": "dreams.daily/date", "as": "text:"}}}, "where": {"this": {"?": {"name": "n"}}, "is": {"?": {"name": "date"}}}}]}), "date").await;
+    assert_eq!(daily, ["2026-10-18.md"]);
 }

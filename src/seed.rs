@@ -59,7 +59,41 @@ pub async fn seed(vault: &Vault) -> Result<Vec<FileResult>> {
             note::put(vault, Put { path: Some(path.to_string()), fields, ..Default::default() }, true).await?;
         }
     }
+    install_rules(vault).await?;
     Ok(results)
+}
+
+/// The seeded rules (SPEC §5.4), in formal notation.
+pub fn rules() -> Vec<serde_json::Value> {
+    use serde_json::json;
+    let var = |n: &str| json!({"?": {"name": n}});
+    vec![
+        json!({
+            "deduce": {"description": "Notes that link to this note", "with": {
+                "backlink": {"the": "dreams.note/backlink", "as": "entity:", "pick": "all:"}}},
+            "when": [{"assert": {"with": {"is": {"the": "dreams.note/link", "as": "entity:", "pick": "all:"}}},
+                      "where": {"this": var("backlink"), "is": var("this")}}]
+        }),
+        json!({
+            "deduce": {"description": "A daily note: its path is a date, YYYY-MM-DD.md", "with": {
+                "date": {"the": "dreams.daily/date", "as": "text:"}}},
+            "when": [
+                {"assert": {"with": {"is": {"the": "dreams.note/path", "as": "text:"}}}, "where": {"this": var("this"), "is": var("date")}},
+                {"assert": "text/like", "where": {"text": var("date"), "pattern": "????-??-??.md", "is": {"?": {}}}}]
+        }),
+    ]
+}
+
+/// Install each seeded rule that isn't installed yet.
+async fn install_rules(vault: &Vault) -> Result<()> {
+    let installed = crate::describe::describe(vault, Some("dialog.rule")).await?["rules"].to_string();
+    for rule in rules() {
+        let the = rule["deduce"]["with"].as_object().and_then(|w| w.values().next()).and_then(|a| a["the"].as_str());
+        if the.is_some_and(|t| !installed.contains(t)) {
+            crate::notation::define_rule(vault, &rule).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Whether `path` is a seeded note.

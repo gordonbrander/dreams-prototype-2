@@ -166,7 +166,7 @@ becomes these facts. `E` is a fresh `did:key`, and `R` is the entity whose path 
 
 ### 5.1 Built-in concepts
 
-dreams defines its built-in concepts in Rust with `#[derive(Attribute)]` and `#[derive(Concept)]` (`dialog-macros`). They are also exported as notation by `dreams describe`. The Task concept in formal notation (YAML) looks like this:
+dreams defines its built-in concepts in formal notation, as JSON in `src/concepts.rs`, the same form agents write and `dreams describe` prints. (Dialog's derive macros would fix them at compile time, but the notation is what validation, `describe` and the query shorthands read anyway.) The Task concept in formal notation (YAML) looks like this:
 
 ```yaml
 description: A scheduled agent. Fires every interval, or when its `when` query's results change.
@@ -220,8 +220,10 @@ A user or agent defines a concept by writing a **schema note**. It has a path un
 
 Agents and users may install **deductive** rules (`define` tool, `dreams rule add`). They are stored by Dialog under `dialog.rule/*` and sync with the vault. Useful seeded rules:
 
-- `dreams.rule/backlink`: derives `dreams.note/backlink` from `dreams.note/link`, so concept queries can read backlinks as a field.
-- `dreams.rule/tagged-daily`: daily notes by path pattern, as a concept.
+- `dreams.note/backlink`: derived from `dreams.note/link`, so queries can read backlinks as an attribute.
+- `dreams.daily/date`: notes whose path is a date (`YYYY-MM-DD.md`), with the path as the date.
+
+Seeding installs each one that isn't installed yet.
 
 **Inductive** rules, which run at commit time, are not exposed over MCP. An agent-installed rule that writes facts on every commit is too easy to get wrong silently. Rule cycles through negation, which can arise from merging, are quarantined by Dialog, and `dreams doctor` lists `dialog.rule/quarantined`.
 
